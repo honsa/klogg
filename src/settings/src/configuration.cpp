@@ -43,7 +43,6 @@
 #include <QKeySequence>
 #include <qcolor.h>
 #include <qglobal.h>
-#include <qmap.h>
 #include <qvariant.h>
 
 #include "configuration.h"
@@ -101,6 +100,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
         = settings.value( "mainFont.antialiasing", DefaultConfiguration.forceFontAntialiasing_ )
               .toBool();
 
+    language_ = settings.value( "view.language", DefaultConfiguration.language_ ).toString();
+
     enableQtHighDpi_
         = settings.value( "view.qtHiDpi", DefaultConfiguration.enableQtHighDpi_ ).toBool();
 
@@ -148,6 +149,9 @@ void Configuration::retrieveFromStorage( QSettings& settings )
             .value( "regexpType.quickfindBackColor",
                     DefaultConfiguration.qfBackColor_.name( QColor::HexArgb ) )
             .toString() );
+
+    qfIgnoreCase_
+        = settings.value( "quickfind.ignore_case", DefaultConfiguration.qfIgnoreCase_ ).toBool();
 
     autoRunSearchOnPatternChange_ = settings
                                         .value( "regexpType.autoRunSearch",
@@ -258,6 +262,8 @@ void Configuration::retrieveFromStorage( QSettings& settings )
               .value( "view.hideAnsiColorSequences", DefaultConfiguration.hideAnsiColorSequences_ )
               .toBool();
 
+    useTextWrap_ = settings.value( "view.textWrap", DefaultConfiguration.useTextWrap() ).toBool();
+
     style_ = settings.value( "view.style", DefaultConfiguration.style_ ).toString();
 
     auto styles = StyleManager::availableStyles();
@@ -276,6 +282,10 @@ void Configuration::retrieveFromStorage( QSettings& settings )
         = settings.value( "defaultView.searchIgnoreCase", DefaultConfiguration.searchIgnoreCase_ )
               .toBool();
 
+    defaultEncodingMib_
+        = settings.value( "defaultView.encodingMib", DefaultConfiguration.defaultEncodingMib_ )
+              .toInt();
+
     if ( settings.contains( "defaultView.splitterSizes" ) ) {
         splitterSizes_.clear();
 
@@ -289,21 +299,35 @@ void Configuration::retrieveFromStorage( QSettings& settings )
 
         const auto mapping = settings.value( "shortcuts.mapping" ).toMap();
         for ( auto keys = mapping.begin(); keys != mapping.end(); ++keys ) {
-            shortcuts_.emplace( keys.key().toStdString(), keys.value().toStringList() );
+            auto action = keys.key().toStdString();
+            if (action == ShortcutAction::LogViewJumpToButtom) {
+                action = ShortcutAction::LogViewJumpToBottom;
+            }
+            shortcuts_.emplace( action, keys.value().toStringList() );
         }
+
         settings.remove( "shortcuts.mapping" );
     }
 
     const auto shortcutsCount = settings.beginReadArray( "shortcuts" );
     for ( auto shortcutIndex = 0; shortcutIndex < shortcutsCount; ++shortcutIndex ) {
         settings.setArrayIndex( static_cast<int>( shortcutIndex ) );
-        const auto action = settings.value( "action", "" ).toString();
-        const auto keys = settings.value( "keys", QStringList() ).toStringList();
+        auto action = settings.value( "action", "" ).toString();
         if ( !action.isEmpty() ) {
+            if (action == ShortcutAction::LogViewJumpToButtom) {
+                action = ShortcutAction::LogViewJumpToBottom;
+            }
+            const auto keys = settings.value( "keys", QStringList() ).toStringList();
             shortcuts_.emplace( action.toStdString(), keys );
         }
     }
     settings.endArray();
+
+    settings.beginGroup( "dark" );
+    for ( auto& color : darkPalette_ ) {
+        color.second = settings.value( color.first, color.second ).toString();
+    }
+    settings.endGroup();
 }
 
 void Configuration::saveToStorage( QSettings& settings ) const
@@ -328,6 +352,7 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "regexpType.quickfindBackColor", qfBackColor_.name( QColor::HexArgb ) );
 
     settings.setValue( "quickfind.incremental", quickfindIncremental_ );
+    settings.setValue( "quickfind.ignore_case", qfIgnoreCase_ );
 
     settings.setValue( "filewatch.useNative", nativeFileWatchEnabled_ );
     settings.setValue( "filewatch.usePolling", pollingEnabled_ );
@@ -363,6 +388,8 @@ void Configuration::saveToStorage( QSettings& settings ) const
     settings.setValue( "view.lineNumbersVisibleInFiltered", lineNumbersVisibleInFiltered_ );
     settings.setValue( "view.minimizeToTray", minimizeToTray_ );
     settings.setValue( "view.style", style_ );
+    settings.setValue( "view.language", language_ );
+    settings.setValue( "view.textWrap", useTextWrap_ );
 
     settings.setValue( "view.qtHiDpi", enableQtHighDpi_ );
     settings.setValue( "view.scaleFactorRounding", scaleFactorRounding_ );
@@ -371,6 +398,7 @@ void Configuration::saveToStorage( QSettings& settings ) const
 
     settings.setValue( "defaultView.searchAutoRefresh", searchAutoRefresh_ );
     settings.setValue( "defaultView.searchIgnoreCase", searchIgnoreCase_ );
+    settings.setValue( "defaultView.encodingMib", defaultEncodingMib_ );
 
     QList<QVariant> splitterSizes;
     std::transform( splitterSizes_.cbegin(), splitterSizes_.cend(),
@@ -388,4 +416,10 @@ void Configuration::saveToStorage( QSettings& settings ) const
         shortcutIndex++;
     }
     settings.endArray();
+
+    settings.beginGroup( "dark" );
+    for ( const auto& color : darkPalette_ ) {
+        settings.setValue( color.first, color.second );
+    }
+    settings.endGroup();
 }

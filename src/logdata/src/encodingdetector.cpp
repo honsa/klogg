@@ -21,8 +21,9 @@
 
 #include <QTextCodec>
 
+#include "containers.h"
 #include "log.h"
-#include "uchardet/uchardet.h"
+#include <uchardet.h>
 
 namespace {
 
@@ -73,21 +74,22 @@ EncodingParameters::EncodingParameters( const QTextCodec* codec )
 
     isUtf8Compatible = codec->mibEnum() == Utf8Mib || codec->mibEnum() == UsAsciiMib;
     isUtf16LE = codec->mibEnum() == Utf16LEMib;
-    
-    QTextCodec::ConverterState convertState( QTextCodec::IgnoreHeader );
-    QByteArray encodedLineFeed = codec->fromUnicode( &LineFeed, 1, &convertState );
 
-    lineFeedWidth = encodedLineFeed.length();
-    lineFeedIndex = encodedLineFeed[ 0 ] == '\n' ? 0 : ( encodedLineFeed.length() - 1 );
+    QTextCodec::ConverterState convertState( QTextCodec::IgnoreHeader );
+    const QByteArray encodedLineFeed = codec->fromUnicode( &LineFeed, 1, &convertState );
+
+    lineFeedWidth = static_cast<int>( encodedLineFeed.size() );
+    lineFeedIndex
+        = encodedLineFeed[ 0 ] == '\n' ? 0 : ( static_cast<int>( encodedLineFeed.size() ) - 1 );
 }
 
-QTextCodec* EncodingDetector::detectEncoding( const QByteArray& block ) const
+QTextCodec* EncodingDetector::detectEncoding( const klogg::vector<char>& block ) const
 {
     UniqueLock lock( mutex_ );
 
     UchardetHolder ud;
 
-    auto rc = ud.handle_data( block.data(), static_cast<size_t>( block.size() ) );
+    auto rc = ud.handle_data( block.data(), block.size() );
     if ( rc == 0 ) {
         ud.data_end();
     }
@@ -105,8 +107,10 @@ QTextCodec* EncodingDetector::detectEncoding( const QByteArray& block ) const
         }
     }
 
-    auto encodingGuess = uchardetCodec ? QTextCodec::codecForUtfText( block, uchardetCodec )
-                                       : QTextCodec::codecForUtfText( block );
+    QByteArray blockArray = QByteArray::fromRawData( block.data(), klogg::isize( block ) );
+
+    auto encodingGuess = uchardetCodec ? QTextCodec::codecForUtfText( blockArray, uchardetCodec )
+                                       : QTextCodec::codecForUtfText( blockArray );
 
     LOG_DEBUG << "Final encoding guess " << encodingGuess->name().constData();
 

@@ -8,7 +8,7 @@
 
 
 [![Github all releases](https://img.shields.io/github/downloads/variar/klogg/total?style=flat)](https://github.com/variar/klogg/releases/)
-[ ![Github](https://img.shields.io/github/v/release/variar/klogg?style=flat&label=Stable%20release)](https://github.com/variar/klogg/releases/tag/v20.12)
+[ ![Github](https://img.shields.io/github/v/release/variar/klogg?style=flat&label=Stable%20release&)](https://github.com/variar/klogg/releases/latest)
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/klogg.svg)](https://repology.org/project/klogg/versions)
 
@@ -16,10 +16,10 @@ Check [GitHub releases](https://github.com/variar/klogg/releases/latest) for Win
 
 Development status
 
-[![Next milestone](https://img.shields.io/github/milestones/progress-percent/variar/klogg/8?style=flat)](https://github.com/variar/klogg/milestone/8)
+[![Next milestone](https://img.shields.io/github/milestones/progress-percent/variar/klogg/4?style=flat&)](https://github.com/variar/klogg/milestone/4)
 [![Ready for testing](https://img.shields.io/github/issues-raw/variar/klogg/status:%20ready%20for%20testing?color=green&label=issues%20ready%20for%20testing&style=flat)](https://github.com/variar/klogg/issues?q=is%3Aopen+is%3Aissue+label%3A%22status%3A+ready+for+testing%22)
 [![Need documentation](https://img.shields.io/github/issues-search/variar/klogg?color=yellow&label=features%20need%20documentation&query=is%3Aissue%20label%3A%22status%3A%20need%20documentation%22&style=flat)](https://github.com/variar/klogg/issues?q=is%3Aissue+label%3A%22status%3A+need+documentation%22)
-[![GitHub commits](https://img.shields.io/github/commits-since/variar/klogg/v20.12.svg?style=flat)](https://github.com/variar/klogg/commits/)
+[![GitHub commits](https://img.shields.io/github/commits-since/variar/klogg/v22.06.svg?style=flat)](https://github.com/variar/klogg/commits/)
 [![CI Build and Release](https://github.com/variar/klogg/actions/workflows/ci-build.yml/badge.svg)](https://github.com/variar/klogg/actions/workflows/ci-build.yml)
 
 [![Chat on Discord](https://img.shields.io/discord/838452586944266260?label=Discord&style=flat)](https://discord.gg/DruNyQftzB) [![Join the chat at https://gitter.im/klogg_log_viewer/community](https://badges.gitter.im/klogg_log_viewer/community.svg)](https://gitter.im/klogg_log_viewer/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
@@ -42,6 +42,8 @@ page for how to use Klogg.
 | Windows | Linux | Mac |
 | ------------- |------------- | ------------- |
 | [continuous-win](https://github.com/variar/klogg/releases/tag/continuous-win) | [continuous-linux](https://github.com/variar/klogg/releases/tag/continuous-linux) | [continuous-osx](https://github.com/variar/klogg/releases/tag/continuous-osx) |
+
+I try to keep a [changelog](CHANGELOG.md) with monthly changes. 
 
 ## Table of Contents
 
@@ -82,11 +84,16 @@ Klogg has all best features of glogg:
 And on top of that klogg:
 
 * Is heavily optimized using multi-threading and SIMD
-* Supports logical combinations of search patterns
+* Supports files with more than 2147483647 lines
+* Includes much faster regular expressions search (2-4 times)
+* Allows combining regular expressions with boolean operators (AND, OR, NOT)
 * Supports many common text encodings
 * Detects file encoding automatically using [uchardet](https://www.freedesktop.org/wiki/Software/uchardet/) library (supports utf8, utf16, cp1251 and more) 
 * Can limit search operations to some part of huge file
 * Allows to configure several highlighters sets and switch between them
+* Has a list of configurable predefined regular expression patterns
+* Includes a dark mode
+* Has configurable shortcuts
 * Has a scratchpad window for taking notes and doing basic data transformations
 * Provides lots of small features that make life easier (closing tabs, copying file paths, favorite files menu, etc.)
 
@@ -95,15 +102,6 @@ Here is a small demo showing how much faster klogg is (searching in ~1Gb file st
 https://user-images.githubusercontent.com/1620716/117588567-bea39100-b12c-11eb-990a-90a667bcaeaa.mp4
 
 List of glogg issues that have been fixed/implemented in klogg can be found [here](https://github.com/variar/klogg/discussions/302).
-
-### Prominent features of dev-builds compared to latest stable release:
-* support for files with more than 2147483647 lines
-* much faster regular expressions search (2-4 times)
-* ability to combine regular expressions with boolean operators (AND, OR, NOT)
-* configurable shortcuts
-* list of configurable predefined regular expression patterns
-* better dark mode
-* build scripts allow to use more dependencies from OS packages instead of vendored versions
 
 List of all changes can be found [here](https://github.com/variar/klogg/milestone/8?closed=1).
 
@@ -115,14 +113,16 @@ This project uses [Calendar Versioning](https://calver.org/). For a list of avai
 
 ### Current stable release builds
 
-Current release is 20.12. Binaries for all platforms can be downloaded from GitHub releases.
+Binaries for all platforms can be downloaded from GitHub releases.
 
-[ ![Release](https://img.shields.io/github/v/release/variar/klogg?style=flat)](https://github.com/variar/klogg/releases/tag/v20.12)
+[ ![Release](https://img.shields.io/github/v/release/variar/klogg?style=flat)](https://github.com/variar/klogg/releases/latest)
 
 #### Windows
-Windows installer is also available from Chocolatey:
+Windows installer is also available from:
 
-[ ![Chocolatey](https://img.shields.io/chocolatey/v/klogg?style=flat)](https://chocolatey.org/packages/klogg)
+* [ ![Chocolatey](https://img.shields.io/chocolatey/v/klogg?style=flat)](https://chocolatey.org/packages/klogg)
+* [ ![Scoop Extras bucket](https://img.shields.io/scoop/v/klogg?bucket=extras)](https://scoopsearch.github.io/#/apps?q=klogg)
+* [Winget package](https://winget.run/pkg/variar/klogg) 
 
 #### Mac OS
 Package for Mac can be installed from Homebrew
@@ -132,23 +132,35 @@ Package for Mac can be installed from Homebrew
 #### Linux
 It is recommended to use klogg package from distribution-specific [repositories](https://repology.org/project/klogg/versions).
 
-Generic packages are available from klogg DEB and RPM repositories hosted at JFrog Artifactory.
-They are built to run on Ubuntu 16.04 and Centos 8 (x86-64 only).
+Generic packages are available from klogg DEB and RPM repositories hosted at GitHub Pages.
+They are built to run on Ubuntu 18.04/20.04/22.04 and Oracle Linux 7/8 (x86-64 only).
 
-For DEB add klogg artifactory repository, then install from apt:
+For DEB packages first download the gpg key:
 ```
-echo deb [trusted=yes] https://favpackage.jfrog.io/artifactory/klogg_deb stable utils | sudo tee -a /etc/apt/sources.list
+curl -sS https://klogg.filimonov.dev/klogg.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/klogg.gpg
+```
+
+You might need to manually create `/etc/apt/keyrings` directory.
+
+Then download the repository list file for you distribution (replace `<ubuntu_release>` with one of `bionic`, `focal`, `jammy`):
+```
+curl -sS https://klogg.filimonov.dev/deb/klogg.<ubuntu_release>.list | sudo tee /etc/apt/sources.list.d/klogg.list
+```
+
+Finally, install using apt
+```
 sudo apt-get update
-sudo apt-get install klogg
+sudo apt install klogg
 ```
 
-For RPM create klogg repo file in `/etc/yum.repos.d/klogg-rpm.repo` with this content:
+If there is already an entry for JFrogg hosted klogg repository in `/etc/apt/sources.list`, then remove this line from it:
 ```
-[Klogg]
-name=Klogg
-baseurl=https://favpackage.jfrog.io/artifactory/klogg_rpm/
-enabled=1
-gpgcheck=0
+deb [trusted=yes] https://favpackage.jfrog.io/artifactory/klogg_deb/ <ubuntu_release> utils
+```
+
+For RPM download klogg repo file (replace `<oracle_release>` with one of `7`, `8`):
+```
+curl -sS https://klogg.filimonov.dev/rpm/klogg-oracle-<oracle_release>.repo | sudo tee /etc/yum.repos.d/klogg-rpm.repo
 ```
 
 Then install using yum
@@ -156,6 +168,12 @@ Then install using yum
 sudo yum update
 sudo yum install klogg
 ```
+
+There is also an AppImage package that can be used without installation. To run klogg from AppImage, download the package and make in executable with either a file manager or terminal command `chmod +x <path_to_klogg_AppImage>` and then run the AppImage file.
+
+AppImage uses FUSE2 and Ubuntu 22.04 has moved away from FUSE2 into FUSE3 and therefore you need to install the necessary package to enable compatibility with FUSE2 `sudo apt install libfuse2`.
+
+As indicated by this link from the official appimage documentation: https://docs.appimage.org/user-guide/troubleshooting/fuse.html#setting-up-fuse-2-x-alongside-of-fuse-3-x-on-recent-ubuntu-22-04-debian-and-their-derivatives
 
 ### Testing builds
 

@@ -46,14 +46,11 @@
 #include <QString>
 #include <QTimer>
 
-#include <algorithm>
 #include <cassert>
-#include <cstdint>
 #include <functional>
-#include <limits>
 #include <numeric>
 #include <tuple>
-#include <utility>
+#include <vector>
 
 #include "logdata.h"
 #include "logfiltereddata.h"
@@ -121,7 +118,7 @@ void LogFilteredData::runSearch( const RegularExpressionPattern& regExp, LineNum
 
             marks_and_matches_ = matching_lines_ | marks_;
 
-            emit searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine );
+            Q_EMIT searchProgressed( LinesCount( matching_lines_.cardinality() ), 100, startLine );
         }
     }
 
@@ -149,7 +146,7 @@ void LogFilteredData::interruptSearch()
     workerThread_.interrupt();
 }
 
-void LogFilteredData::clearSearch(bool dropCache)
+void LogFilteredData::clearSearch( bool dropCache )
 {
     interruptSearch();
 
@@ -159,7 +156,7 @@ void LogFilteredData::clearSearch(bool dropCache)
     maxLength_ = 0_length;
     nbLinesProcessed_ = 0_lcount;
 
-    if (dropCache) {
+    if ( dropCache ) {
         searchResultsCache_.clear();
     }
 }
@@ -346,6 +343,11 @@ void LogFilteredData::setVisibility( Visibility visi )
     visibility_ = visi;
 }
 
+LogFilteredData::Visibility LogFilteredData::visibility() const
+{
+    return visibility_;
+}
+
 void LogFilteredData::updateSearchResultsCache()
 {
     const auto& config = Configuration::get();
@@ -363,17 +365,15 @@ void LogFilteredData::updateSearchResultsCache()
         LOG_DEBUG << "LogFilteredData: too many matches to place in cache";
     }
     else {
-        LOG_INFO << "LogFilteredData: caching results for key " << std::get<0>( currentSearchKey_ ).pattern
-                 << "_" << std::get<1>( currentSearchKey_ ) << "_"
-                 << std::get<2>( currentSearchKey_ );
+        LOG_INFO << "LogFilteredData: caching results for key "
+                 << std::get<0>( currentSearchKey_ ).pattern << "_"
+                 << std::get<1>( currentSearchKey_ ) << "_" << std::get<2>( currentSearchKey_ );
 
         searchResultsCache_[ currentSearchKey_ ] = { matching_lines_, maxLength_ };
-
-        auto cacheSize
-            = std::transform_reduce( searchResultsCache_.cbegin(), searchResultsCache_.cend(),
-                                     uint64_t{}, std::plus{}, []( const auto& cachedResults ) {
-                                         return cachedResults.second.matching_lines.cardinality();
-                                     } );
+        auto cacheSize = std::accumulate( searchResultsCache_.cbegin(), searchResultsCache_.cend(),
+                                          uint64_t{ 0 }, []( const auto& acc, const auto& next ) {
+                                              return acc + next.second.matching_lines.cardinality();
+                                          } );
 
         LOG_INFO << "LogFilteredData: cache size " << cacheSize;
 
@@ -392,7 +392,7 @@ void LogFilteredData::updateSearchResultsCache()
 }
 
 //
-// Slots
+// Q_SLOTS:
 //
 void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress,
                                               LineNumber initialLine )
@@ -417,7 +417,7 @@ void LogFilteredData::handleSearchProgressed( LinesCount nbMatches, int progress
         searchProgress_ = std::make_tuple( nbMatches, progress, initialLine );
     }
 
-    emit searchProgressedThrottled();
+    Q_EMIT searchProgressedThrottled();
 
     if ( progress == 100 ) {
         detachReader();
@@ -437,7 +437,7 @@ void LogFilteredData::handleSearchProgressedThrottled()
         ScopedLock lock( searchProgressMutex_ );
         std::tie( nbMatches, progress, initialLine ) = searchProgress_;
     }
-    emit searchProgressed( nbMatches, progress, initialLine );
+    Q_EMIT searchProgressed( nbMatches, progress, initialLine );
 }
 
 LineNumber LogFilteredData::findLogDataLine( LineNumber index ) const
@@ -496,33 +496,38 @@ QString LogFilteredData::doGetExpandedLineString( LineNumber index ) const
 }
 
 // Implementation of the virtual function.
-std::vector<QString> LogFilteredData::doGetLines( LineNumber first_line, LinesCount number ) const
+klogg::vector<QString> LogFilteredData::doGetLines( LineNumber first_line, LinesCount number ) const
 {
     return doGetLines( first_line, number,
                        [ this ]( const auto& line ) { return doGetLineString( line ); } );
 }
 
 // Implementation of the virtual function.
-std::vector<QString> LogFilteredData::doGetExpandedLines( LineNumber first_line,
+klogg::vector<QString> LogFilteredData::doGetExpandedLines( LineNumber first_line,
                                                           LinesCount number ) const
 {
     return doGetLines( first_line, number,
                        [ this ]( const auto& line ) { return doGetExpandedLineString( line ); } );
 }
 
-std::vector<QString>
+klogg::vector<QString>
 LogFilteredData::doGetLines( LineNumber first_line, LinesCount number,
                              const std::function<QString( LineNumber )>& lineGetter ) const
 {
-    std::vector<LineNumber::UnderlyingType> lineNumbers( number.get() );
+    klogg::vector<LineNumber::UnderlyingType> lineNumbers( number.get() );
     std::iota( lineNumbers.begin(), lineNumbers.end(), first_line.get() );
 
-    std::vector<QString> lines( number.get() );
+    klogg::vector<QString> lines( number.get() );
     std::transform(
         lineNumbers.cbegin(), lineNumbers.cend(), lines.begin(),
         [ &lineGetter ]( const auto& line ) { return lineGetter( LineNumber( line ) ); } );
 
     return lines;
+}
+
+LineNumber LogFilteredData::doGetLineNumber(LineNumber index) const
+{
+    return getMatchingLineNumber(index);
 }
 
 // Implementation of the virtual function.

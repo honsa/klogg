@@ -47,26 +47,17 @@
 #include <cassert>
 #include <cmath>
 #include <complex>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <iostream>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
-#include <qpen.h>
-#include <qwidget.h>
-#include <string_view>
+#include <qcolor.h>
+#include <qscreen.h>
 #include <utility>
 #include <vector>
 
-#include <QAction>
-#include <QActionGroup>
 #include <QApplication>
 #include <QClipboard>
-#include <QFile>
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QGestureEvent>
@@ -79,17 +70,25 @@
 #include <QRect>
 #include <QScrollBar>
 #include <QShortcut>
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+#include <QStringView>
+#else
+#include <QStringRef>
+#endif
 #include <QtCore>
 
 #include <tbb/flow_graph.h>
 
+#include "abstractlogview.h"
+#include "containers.h"
 #include "linetypes.h"
 
+#include "active_screen.h"
+#include "clipboard.h"
 #include "configuration.h"
 #include "highlighterset.h"
 #include "highlightersmenu.h"
 #include "log.h"
-#include "logmainview.h"
 #include "overview.h"
 #include "quickfind.h"
 #include "quickfindpattern.h"
@@ -184,6 +183,24 @@ int textWidth( const QFontMetrics& fm, const QString& text )
 #endif
 }
 
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+int textWidth( const QFontMetrics& fm, const QStringView& text )
+{
+    if ( text.isEmpty() ) {
+        return 0;
+    }
+    return textWidth( fm, QString::fromRawData( text.data(), klogg::isize( text ) ) );
+}
+#else
+int textWidth( const QFontMetrics& fm, const QStringRef& text )
+{
+    if ( text.isEmpty() ) {
+        return 0;
+    }
+    return textWidth( fm, QString::fromRawData( text.data(), klogg::isize( text ) ) );
+}
+#endif
+
 std::unique_ptr<QPainter> pixmapPainter( QPaintDevice* paintDevice, const QFont& font )
 {
     auto painter = std::make_unique<QPainter>( paintDevice );
@@ -203,63 +220,233 @@ QFontMetrics pixmapFontMetrics( const QFont& font )
     return devicePainter->fontMetrics();
 }
 
-} // namespace
+class WrappedLinesView {
+  public:
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+    using WrappedString = QStringView;
+#else
+    using WrappedString = QStringRef;
+#endif
 
-inline void LineDrawer::addChunk( int firstCol, int lastCol, const QColor& fore,
-                                  const QColor& back )
-{
-    if ( firstCol < 0 ) {
-        firstCol = 0;
-    }
-
-    const auto length = lastCol - firstCol + 1;
-
-    if ( length > 0 ) {
-        chunks_.emplace_back( firstCol, lastCol, fore, back );
-    }
-}
-
-inline void LineDrawer::addChunk( const LineChunk& chunk )
-{
-    addChunk( chunk.start(), chunk.end(), chunk.foreColor(), chunk.backColor() );
-}
-
-inline void LineDrawer::draw( QPainter* painter, int initialXPos, int initialYPos, int lineWidth,
-                              const QString& line, int leftExtraBackgroundPx )
-{
-    QFontMetrics fm = painter->fontMetrics();
-    const int fontHeight = fm.height();
-    const int fontAscent = fm.ascent();
-
-    int xPos = initialXPos;
-    int yPos = initialYPos;
-
-    for ( const auto& chunk : chunks_ ) {
-        // Draw each chunk
-        // LOG_DEBUG << "Chunk: " << chunk.start() << " " << chunk.length();
-        const auto cutline = line.mid( chunk.start(), chunk.length() );
-        const int chunkWidth = textWidth( fm, cutline );
-        if ( xPos == initialXPos ) {
-            // First chunk, we extend the left background a bit,
-            // it looks prettier.
-            painter->fillRect( xPos - leftExtraBackgroundPx, yPos,
-                               chunkWidth + leftExtraBackgroundPx, fontHeight, chunk.backColor() );
+    explicit WrappedLinesView( const QString& longLine, LineLength visibleColumns )
+    {
+        if ( longLine.isEmpty() ) {
+            wrappedLines_.push_back( WrappedString{} );
         }
         else {
-            // other chunks...
-            painter->fillRect( xPos, yPos, chunkWidth, fontHeight, chunk.backColor() );
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+            WrappedString lineToWrap( longLine );
+#else
+            WrappedString lineToWrap( &longLine );
+#endif
+            while ( lineToWrap.size() > visibleColumns.get() ) {
+                wrappedLines_.push_back( lineToWrap.left( visibleColumns.get() ) );
+                lineToWrap = lineToWrap.mid( visibleColumns.get() );
+            }
+            if ( lineToWrap.size() > 0 ) {
+                wrappedLines_.push_back( lineToWrap );
+            }
         }
-        painter->setPen( chunk.foreColor() );
-        painter->drawText( xPos, yPos + fontAscent, cutline );
-        xPos += chunkWidth;
     }
 
-    // Draw the empty block at the end of the line
-    int blankWidth = lineWidth - xPos;
+    size_t wrappedLinesCount() const
+    {
+        return wrappedLines_.size();
+    }
 
-    if ( blankWidth > 0 )
-        painter->fillRect( xPos, yPos, blankWidth, fontHeight, backColor_ );
-}
+    klogg::vector<WrappedString> mid( LineColumn start, LineLength length ) const
+    {
+        auto getLength = []( const auto& view ) -> LineLength::UnderlyingType {
+            return type_safe::narrow_cast<LineLength::UnderlyingType>( view.size() );
+        };
+
+        klogg::vector<WrappedString> resultChunks;
+        if ( wrappedLines_.size() == 1 ) {
+            auto& wrappedLine = wrappedLines_.front();
+            auto len = std::min( length.get(), getLength( wrappedLine ) - start.get() );
+            resultChunks.push_back( wrappedLine.mid( start.get(), ( len > 0 ? len : 0 ) ) );
+            return resultChunks;
+        }
+
+        size_t wrappedLineIndex = 0;
+        auto positionInWrappedLine = start.get();
+        while ( positionInWrappedLine > getLength( wrappedLines_[ wrappedLineIndex ] ) ) {
+            positionInWrappedLine -= getLength( wrappedLines_[ wrappedLineIndex ] );
+            wrappedLineIndex++;
+            if ( wrappedLineIndex >= wrappedLines_.size() ) {
+                return resultChunks;
+            }
+        }
+
+        auto chunkLength = length.get();
+        while ( positionInWrappedLine + chunkLength
+                > getLength( wrappedLines_[ wrappedLineIndex ] ) ) {
+            resultChunks.push_back(
+                wrappedLines_[ wrappedLineIndex ].mid( positionInWrappedLine ) );
+            wrappedLineIndex++;
+            positionInWrappedLine = 0;
+            chunkLength -= getLength( resultChunks.back() );
+            if ( wrappedLineIndex >= wrappedLines_.size() ) {
+                return resultChunks;
+            }
+        }
+
+        if ( chunkLength > 0 ) {
+            auto& wrappedLine = wrappedLines_[ wrappedLineIndex ];
+            auto len = std::min( chunkLength, getLength( wrappedLine ) - positionInWrappedLine );
+            resultChunks.push_back(
+                wrappedLine.mid( positionInWrappedLine, ( len > 0 ? len : 0 ) ) );
+        }
+
+        return resultChunks;
+    }
+
+    bool isEmpty() const
+    {
+        return wrappedLines_.empty() || wrappedLines_.front().isEmpty();
+    }
+
+    klogg::vector<WrappedString> wrappedLines_;
+};
+
+class LineChunk {
+  public:
+    LineChunk( LineColumn firstCol, LineColumn endCol, QColor foreColor, QColor backColor )
+        : start_{ firstCol }
+        , end_{ endCol }
+        , foreColor_{ foreColor }
+        , backColor_{ backColor }
+    {
+    }
+
+    LineColumn start() const
+    {
+        return start_;
+    }
+    LineColumn end() const
+    {
+        return end_;
+    }
+
+    LineLength size() const
+    {
+        auto length = end_.get() - start_.get() + 1;
+        return length >= 0 ? LineLength{ length } : 0_length;
+    }
+
+    QColor foreColor() const
+    {
+        return foreColor_;
+    }
+
+    QColor backColor() const
+    {
+        return backColor_;
+    }
+
+  private:
+    LineColumn start_ = {};
+    LineColumn end_ = {};
+
+    QColor foreColor_;
+    QColor backColor_;
+};
+
+// Utility class for syntax colouring.
+// It stores the chunks of line to draw
+// each chunk having a different colour
+class LineDrawer {
+  public:
+    explicit LineDrawer( const QColor& backColor )
+        : backColor_( backColor )
+    {
+    }
+
+    // Add a chunk of line using the given colours.
+    // Both first_col and last_col are included
+    // An empty chunk will be ignored.
+    // the first column will be set to 0 if negative
+    // The column are relative to the screen
+    void addChunk( LineColumn firstCol, LineColumn lastCol, QColor fore, QColor back )
+    {
+        // LOG_INFO << "addChunk " << firstCol.get() << " " << lastCol.get();
+        const auto length = lastCol.get() - firstCol.get() + 1;
+
+        if ( length > 0 ) {
+            chunks_.emplace_back( firstCol, lastCol, fore, back );
+        }
+
+        // LOG_INFO << "added Chunk of  " << length;
+    }
+
+    // Draw the current line of text using the given painter,
+    // in the passed block (in pixels)
+    // The line must be cut to fit on the screen.
+    // leftExtraBackgroundPx is the an extra margin to start drawing
+    // the coloured // background, going all the way to the element
+    // left of the line looks better.
+    void draw( QPainter* painter, int initialXPos, int initialYPos, int lineWidth,
+               const WrappedLinesView& wrappedLines, int leftExtraBackgroundPx )
+    {
+        QFontMetrics fm = painter->fontMetrics();
+        const int fontHeight = fm.height();
+        const int fontAscent = fm.ascent();
+
+        int xPos = initialXPos;
+        int yPos = initialYPos;
+        // LOG_INFO << "drawing chunks " << chunks_.size();
+        for ( const auto& chunk : chunks_ ) {
+            // Draw each chunk
+            // LOG_INFO << "draw chunk: " << chunk.start().get() << " " << chunk.size().get()
+            //         << " empty w: " << wrappedLines.isEmpty();
+            const auto& wrappedChunks = wrappedLines.mid( chunk.start(), chunk.size() );
+            bool isFirstLine = true;
+            for ( const auto& chunkText : wrappedChunks ) {
+                if ( !isFirstLine ) {
+                    xPos = initialXPos;
+                    yPos += fontHeight;
+                }
+                isFirstLine = false;
+
+                if ( chunkText.isEmpty() ) {
+                    continue;
+                }
+
+                auto chunkWidth = textWidth( fm, chunkText );
+                if ( xPos == initialXPos ) {
+                    // First chunk, we extend the left background a bit,
+                    // it looks prettier.
+                    painter->fillRect( xPos - leftExtraBackgroundPx, yPos,
+                                       chunkWidth + leftExtraBackgroundPx, fontHeight,
+                                       chunk.backColor() );
+                }
+                else {
+                    // other chunks...
+                    painter->fillRect( xPos, yPos, chunkWidth, fontHeight, chunk.backColor() );
+                }
+
+                painter->setPen( chunk.foreColor() );
+                painter->drawText(
+                    xPos, yPos + fontAscent,
+                    QString::fromRawData( chunkText.data(), klogg::isize( chunkText ) ) );
+
+                xPos += chunkWidth;
+            }
+        }
+
+        // Draw the empty block at the end of the line
+        int blankWidth = lineWidth - xPos;
+
+        if ( blankWidth > 0 )
+            painter->fillRect( xPos, yPos, blankWidth, fontHeight, backColor_ );
+    }
+
+  private:
+    klogg::vector<LineChunk> chunks_;
+    QColor backColor_;
+};
+
+} // namespace
 
 void DigitsBuffer::reset()
 {
@@ -312,6 +499,8 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
 {
     setViewport( nullptr );
 
+    useTextWrap_ = Configuration::get().useTextWrap();
+
     // Hovering
     setMouseTracking( true );
 
@@ -329,6 +518,17 @@ AbstractLogView::AbstractLogView( const AbstractLogData* newLogData,
     connect( &followElasticHook_, SIGNAL( lengthChanged() ), this, SLOT( repaint() ) );
     connect( &followElasticHook_, SIGNAL( hooked( bool ) ), this,
              SIGNAL( followModeChanged( bool ) ) );
+
+    connect( verticalScrollBar(), &QAbstractSlider::actionTriggered, this, [ this ]( int action ) {
+        if ( !followMode_ ) {
+            return;
+        }
+
+        if ( action == QAbstractSlider::SliderPageStepSub
+             || action == QAbstractSlider::SliderSingleStepSub ) {
+            disableFollow();
+        }
+    } );
 }
 
 AbstractLogView::~AbstractLogView()
@@ -360,7 +560,7 @@ void AbstractLogView::changeEvent( QEvent* changeEvent )
 
 void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 {
-    auto line = convertCoordToLine( mouseEvent->y() );
+    auto line = convertCoordToLine( mouseEvent->pos().y() );
 
     if ( mouseEvent->button() == Qt::LeftButton ) {
         // Invalidate our cache
@@ -368,11 +568,12 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
 
         if ( line.has_value() && mouseEvent->modifiers() & Qt::ShiftModifier ) {
             selection_.selectRangeFromPrevious( *line );
-            emit updateLineNumber( *line );
+            selectionCurrentEndPos_ = convertCoordToFilePos( mouseEvent->pos() );
+            Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
             update();
         }
         else if ( line.has_value() ) {
-            if ( mouseEvent->x() < bulletZoneWidthPx_ ) {
+            if ( mouseEvent->pos().x() < bulletZoneWidthPx_ ) {
                 // Mark a line if it is clicked in the left margin
                 // (only if click and release in the same area)
                 markingClickInitiated_ = true;
@@ -382,8 +583,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 // Select the line, and start a selection
                 if ( *line < logData_->getNbLine() ) {
                     selection_.selectLine( *line );
-                    emit updateLineNumber( *line );
-                    emit newSelection( *line );
+                    Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
                 }
 
                 // Remember the click in case we're starting a selection
@@ -401,15 +601,15 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
         const auto filePos = convertCoordToFilePos( mouseEvent->pos() );
 
         if ( line.has_value()
-             && !selection_.isPortionSelected( *line, filePos.column, filePos.column ) ) {
+             && !selection_.isPortionSelected( *line, filePos.column(), filePos.column() ) ) {
             selection_.selectLine( *line );
-            emit updateLineNumber( *line );
+            Q_EMIT newSelection( *line, 1_lcount, 0_lcol, 0_length );
             textAreaCache_.invalid_ = true;
-            emit newSelection( *line );
         }
 
         if ( selection_.isSingleLine() ) {
-            copyAction_->setText( "&Copy this line" );
+            copyAction_->setText( tr( "&Copy this line" ) );
+            copyWithLineNumbersAction_->setText( tr( "Copy this line with line number" ) );
 
             setSearchStartAction_->setEnabled( true );
             setSearchEndAction_->setEnabled( true );
@@ -418,8 +618,10 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             setSelectionEndAction_->setEnabled( !!selectionStart_ );
         }
         else {
-            copyAction_->setText( "&Copy" );
+            copyAction_->setText( tr( "&Copy" ) );
             copyAction_->setStatusTip( tr( "Copy the selection" ) );
+
+            copyWithLineNumbersAction_->setText( tr( "Copy with line numbers" ) );
 
             setSearchStartAction_->setEnabled( false );
             setSearchEndAction_->setEnabled( false );
@@ -427,6 +629,18 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             setSelectionStartAction_->setEnabled( false );
             setSelectionEndAction_->setEnabled( false );
         }
+
+        bool hasUnmarkedLines = false;
+        auto lines = selection_.getLines();
+        for ( auto i = 0u; i < lines.size(); ++i ) {
+            using LineTypeFlags = AbstractLogData::LineTypeFlags;
+            const auto currentLineType = lineType( lines[ i ] );
+            if ( !currentLineType.testFlag( LineTypeFlags::Mark ) ) {
+                hasUnmarkedLines = true;
+                break;
+            }
+        }
+        markAction_->setText( hasUnmarkedLines ? tr( "&Mark" ) : tr( "Unmark" ) );
 
         if ( selection_.isPortion() ) {
             findNextAction_->setEnabled( true );
@@ -441,12 +655,9 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
             replaceSearchAction_->setEnabled( false );
         }
 
-        auto highlightersActionGroup = new QActionGroup( this );
-        highlightersActionGroup->setExclusive( false );
-        connect( highlightersActionGroup, &QActionGroup::triggered, this,
-                 &AbstractLogView::setHighlighterSet );
-        highlightersMenu_->clear();
-        populateHighlightersMenu( highlightersMenu_, highlightersActionGroup );
+        highlightersMenu_->createHighlightersMenu();
+        highlightersMenu_->populateHighlightersMenu();
+        highlightersMenu_->setApplyChange( [ this ]() { Q_EMIT highlightersChange(); } );
 
         auto colorLablesActionGroup = new QActionGroup( this );
         connect( colorLablesActionGroup, &QActionGroup::triggered, this,
@@ -463,7 +674,7 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 }
             }
 
-            auto noneAction = colorLabelsMenu_->addAction( "None" );
+            auto noneAction = colorLabelsMenu_->addAction( tr( "None" ) );
             noneAction->setActionGroup( colorLablesActionGroup );
             noneAction->setCheckable( true );
             noneAction->setChecked( !currentLabel.has_value() );
@@ -494,24 +705,21 @@ void AbstractLogView::mousePressEvent( QMouseEvent* mouseEvent )
                 fillColor.setAlphaF( 1.0 );
                 pixmap.fill( fillColor );
                 colorLabelAction->setIcon( QIcon( pixmap ) );
-#ifdef Q_OS_WIN
                 colorLabelAction->setIconVisibleInMenu( true );
-#endif
             }
             colorLabelsMenu_->addSeparator();
-            auto clearAllAction = colorLabelsMenu_->addAction( "Clear all" );
+            auto clearAllAction = colorLabelsMenu_->addAction( tr( "Clear all" ) );
             connect( clearAllAction, &QAction::triggered, this,
                      &AbstractLogView::clearColorLabels );
         }
-
         // Display the popup (blocking)
-        popupMenu_->exec( QCursor::pos() );
+        popupMenu_->exec( QCursor::pos( activeScreen( this ) ) );
 
-        highlightersActionGroup->deleteLater();
+        highlightersMenu_->clearHighlightersMenu();
         colorLablesActionGroup->deleteLater();
     }
 
-    emit activity();
+    Q_EMIT activity();
 }
 
 void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
@@ -523,44 +731,52 @@ void AbstractLogView::mouseMoveEvent( QMouseEvent* mouseEvent )
 
         const auto thisEndPos = convertCoordToFilePos( mouseEvent->pos() );
 
-        if ( thisEndPos.line != selectionCurrentEndPos_.line
-             || thisEndPos.column != selectionCurrentEndPos_.column ) {
-            const auto lineNumber = thisEndPos.line;
+        if ( thisEndPos != selectionCurrentEndPos_ ) {
+            const auto lineNumber = thisEndPos.line();
             // Are we on a different line?
-            if ( selectionStartPos_.line != thisEndPos.line ) {
-                if ( thisEndPos.line != selectionCurrentEndPos_.line ) {
+            if ( selectionStartPos_.line() != thisEndPos.line() ) {
+                if ( thisEndPos.line() != selectionCurrentEndPos_.line() ) {
                     // This is a 'range' selection
-                    selection_.selectRange( selectionStartPos_.line, lineNumber );
-                    emit updateLineNumber( lineNumber );
+                    selection_.selectRange( selectionStartPos_.line(), lineNumber );
+
+                    Q_EMIT newSelection(
+                        lineNumber, selection_.getSelectedLinesCount(),
+                        0_lcol, // portion selection always starts from the first column
+                        LineLength{ getSelectedText().size() } );
+
                     update();
                 }
             }
             // So we are on the same line. Are we moving horizontaly?
-            else if ( thisEndPos.column != selectionCurrentEndPos_.column ) {
+            else if ( thisEndPos.column() != selectionCurrentEndPos_.column() ) {
                 // This is a 'portion' selection
-                selection_.selectPortion( lineNumber, selectionStartPos_.column,
-                                          thisEndPos.column );
+                selection_.selectPortion( lineNumber, selectionStartPos_.column(),
+                                          thisEndPos.column() );
+                auto selectionStr = getSelectedText();
+                Q_EMIT newSelection( lineNumber, 1_lcount, selectionStartPos_.column(),
+                                     LineLength( selectionStr.size() ) );
                 update();
             }
             // On the same line, and moving vertically then
             else {
                 // This is a 'line' selection
                 selection_.selectLine( lineNumber );
-                emit updateLineNumber( lineNumber );
+                Q_EMIT newSelection( lineNumber, 1_lcount, 0_lcol, 0_length );
                 update();
             }
             selectionCurrentEndPos_ = thisEndPos;
-
-            // Do we need to scroll while extending the selection?
-            QRect visible = viewport()->rect();
-            if ( visible.contains( mouseEvent->pos() ) )
-                autoScrollTimer_.stop();
-            else if ( !autoScrollTimer_.isActive() )
-                autoScrollTimer_.start( 100, this );
         }
+
+        // Do we need to scroll while extending the selection?
+        QRect visible = viewport()->rect();
+        visible.setLeft( leftMarginPx_ );
+        if ( visible.contains( mouseEvent->pos() ) )
+            autoScrollTimer_.stop();
+        else if ( !autoScrollTimer_.isActive() )
+            autoScrollTimer_.start( 100, this );
     }
     else {
-        considerMouseHovering( mouseEvent->x(), mouseEvent->y() );
+        considerMouseHovering( mouseEvent->pos().x(), mouseEvent->pos().y() );
     }
 }
 
@@ -568,12 +784,12 @@ void AbstractLogView::mouseReleaseEvent( QMouseEvent* mouseEvent )
 {
     if ( markingClickInitiated_ ) {
         markingClickInitiated_ = false;
-        const auto line = convertCoordToLine( mouseEvent->y() );
+        const auto line = convertCoordToLine( mouseEvent->pos().y() );
         if ( line.has_value() && line == markingClickLine_ ) {
             // Invalidate our cache
             textAreaCache_.invalid_ = true;
 
-            emit markLines( { *line } );
+            Q_EMIT markLines( { *line } );
         }
     }
     else {
@@ -594,14 +810,15 @@ void AbstractLogView::mouseDoubleClickEvent( QMouseEvent* mouseEvent )
         selectWordAtPosition( pos );
     }
 
-    emit activity();
+    Q_EMIT activity();
 }
 
 void AbstractLogView::timerEvent( QTimerEvent* timerEvent )
 {
     if ( timerEvent->timerId() == autoScrollTimer_.timerId() ) {
         QRect visible = viewport()->rect();
-        const QPoint globalPos = QCursor::pos();
+        visible.setLeft( leftMarginPx_ );
+        const QPoint globalPos = QCursor::pos( activeScreen( this ) );
         const QPoint pos = viewport()->mapFromGlobal( globalPos );
         QMouseEvent ev( QEvent::MouseMove, pos, globalPos, Qt::LeftButton, Qt::LeftButton,
                         Qt::NoModifier );
@@ -655,12 +872,13 @@ void AbstractLogView::registerShortcut( const std::string& action, std::function
 
 void AbstractLogView::registerShortcuts()
 {
-    LOG_INFO << "Reloading shortcuts";
     doRegisterShortcuts();
 }
 
 void AbstractLogView::doRegisterShortcuts()
 {
+    LOG_INFO << "Reloading shortcuts";
+
     for ( auto& shortcut : shortcuts_ ) {
         shortcut.second->deleteLater();
     }
@@ -685,13 +903,16 @@ void AbstractLogView::doRegisterShortcuts()
 
     registerShortcut( ShortcutAction::LogViewJumpToTop,
                       [ this ]() { selectAndDisplayLine( 0_lnum ); } );
-    registerShortcut( ShortcutAction::LogViewJumpToButtom, [ this ]() {
-        disableFollow();
-        const auto line = LineNumber( logData_->getNbLine().get() ) - 1_lcount;
-        selection_.selectLine( line );
-        emit updateLineNumber( line );
-        emit newSelection( line );
-        jumpToBottom();
+    registerShortcut( ShortcutAction::LogViewJumpToBottom, [ this ]() {
+        const bool wasAtBottom = verticalScrollBar()->value() == verticalScrollBar()->maximum();
+        if ( !wasAtBottom ) {
+            selectAndDisplayLine( maxDisplayLineNumber() - 1_lcount );
+            jumpToBottom();
+        }
+        else {
+            Q_EMIT followModeChanged( true );
+            followElasticHook_.hook( true );
+        }
     } );
 
     registerShortcut( ShortcutAction::LogViewJumpToStartOfLine,
@@ -700,8 +921,8 @@ void AbstractLogView::doRegisterShortcuts()
     registerShortcut( ShortcutAction::LogViewJumpToRightOfScreen,
                       [ this ]() { jumpToRightOfScreen(); } );
 
-    registerShortcut( ShortcutAction::LogViewQfForward, [ this ]() { emit searchNext(); } );
-    registerShortcut( ShortcutAction::LogViewQfBackward, [ this ]() { emit searchPrevious(); } );
+    registerShortcut( ShortcutAction::LogViewQfForward, [ this ]() { Q_EMIT searchNext(); } );
+    registerShortcut( ShortcutAction::LogViewQfBackward, [ this ]() { Q_EMIT searchPrevious(); } );
     registerShortcut( ShortcutAction::LogViewQfSelectedForward,
                       [ this ]() { findNextSelected(); } );
     registerShortcut( ShortcutAction::LogViewQfSelectedBackward,
@@ -714,7 +935,40 @@ void AbstractLogView::doRegisterShortcuts()
         trySelectLine( LineNumber( newLine ) );
     } );
 
-    registerShortcut( ShortcutAction::LogViewExitView, [ this ]() { emit exitView(); } );
+    registerShortcut( ShortcutAction::LogViewExitView, [ this ]() { Q_EMIT exitView(); } );
+
+    registerShortcut( ShortcutAction::LogViewSendSelectionToScratchpad,
+                      [ this ]() { Q_EMIT sendSelectionToScratchpad(); } );
+
+    registerShortcut( ShortcutAction::LogViewReplaceScratchpadWithSelection,
+                      [ this ]() { Q_EMIT replaceScratchpadWithSelection(); } );
+
+    registerShortcut( ShortcutAction::LogViewAddToSearch, [ this ]() { addToSearch(); } );
+    registerShortcut( ShortcutAction::LogViewExcludeFromSearch,
+                      [ this ]() { excludeFromSearch(); } );
+    registerShortcut( ShortcutAction::LogViewReplaceSearch, [ this ]() { replaceSearch(); } );
+
+    registerShortcut( ShortcutAction::LogViewSelectLinesUp, [ this ]() {
+        auto newPosition = selectionCurrentEndPos_;
+        if ( newPosition.line() == 0_lnum ) {
+            // Reached the begin
+            return;
+        }
+        newPosition = FilePosition( selectionCurrentEndPos_.line() - 1_lcount,
+                                    selectionCurrentEndPos_.column() );
+        selectAndDisplayRange( newPosition );
+    } );
+
+    registerShortcut( ShortcutAction::LogViewSelectLinesDown, [ this ]() {
+        auto newPosition = selectionCurrentEndPos_;
+        if ( newPosition.line() >= maxDisplayLineNumber() - 1_lcount ) {
+            // Reached the end
+            return;
+        }
+        newPosition = FilePosition( selectionCurrentEndPos_.line() + 1_lcount,
+                                    selectionCurrentEndPos_.column() );
+        selectAndDisplayRange( newPosition );
+    } );
 }
 
 void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
@@ -723,7 +977,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
 
     const auto text = keyEvent->text();
 
-    if ( keyEvent->modifiers() == Qt::NoModifier && text.count() == 1 ) {
+    if ( keyEvent->modifiers() == Qt::NoModifier && text.size() == 1 ) {
         const auto character = text.at( 0 ).toLatin1();
         if ( ( ( character > '0' ) && ( character <= '9' ) )
              || ( !digitsBuffer_.isEmpty() && character == '0' ) ) {
@@ -741,7 +995,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
     }
 
     if ( keyEvent->isAccepted() ) {
-        emit activity();
+        Q_EMIT activity();
     }
     else {
         // Only pass bare keys to the superclass this is so that
@@ -755,7 +1009,7 @@ void AbstractLogView::keyPressEvent( QKeyEvent* keyEvent )
 
 void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
 {
-    emit activity();
+    Q_EMIT activity();
 
     int yDelta = 0;
     const auto pixelDelta = wheelEvent->pixelDelta();
@@ -774,7 +1028,7 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
     }
 
     if ( wheelEvent->modifiers().testFlag( Qt::ControlModifier ) ) {
-        emit changeFontSize( yDelta > 0 );
+        Q_EMIT changeFontSize( yDelta > 0 );
         return;
     }
 
@@ -789,10 +1043,16 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
     if ( verticalScrollBar()->value() == verticalScrollBar()->maximum() ) {
         if ( allowFollowOnScroll || yDelta > 0 ) {
             // First see if we need to block the elastic (on Mac)
-            if ( wheelEvent->phase() == Qt::ScrollBegin )
+            if ( wheelEvent->phase() == Qt::ScrollBegin ) {
                 followElasticHook_.hold();
-            else if ( wheelEvent->phase() == Qt::ScrollEnd )
+            }
+            else if ( wheelEvent->phase() == Qt::ScrollEnd
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
+                      || wheelEvent->phase() == Qt::ScrollMomentum
+#endif
+            ) {
                 followElasticHook_.release();
+            }
 
             followElasticHook_.move( -yDelta );
         }
@@ -800,9 +1060,9 @@ void AbstractLogView::wheelEvent( QWheelEvent* wheelEvent )
         // LOG_DEBUG << "Elastic " << y_delta;
     }
 
-    // LOG_DEBUG << "Length = " << followElasticHook_.length();
+    // LOG_DEBUG << "Length = " << followElasticHook_.size();
     if ( !allowFollowOnScroll
-         || ( followElasticHook_.length() == 0 && !followElasticHook_.isHooked() ) ) {
+         || ( followElasticHook_.size() == 0 && !followElasticHook_.isHooked() ) ) {
         QAbstractScrollArea::wheelEvent( wheelEvent );
     }
 }
@@ -879,15 +1139,16 @@ void AbstractLogView::scrollContentsBy( int dx, int dy )
         lastLineAligned_ = false;
     }
 
-    firstCol_ = ( firstCol_ - dx ) > 0 ? firstCol_ - dx : 0;
-    const auto lastLine = firstLine_ + getNbVisibleLines();
+    firstCol_ = ( firstCol_.get() - dx ) >= 0 ? LineColumn{ firstCol_.get() - dx } : 0_lcol;
 
     // Update the overview if we have one
-    if ( overview_ != nullptr )
+    if ( overview_ != nullptr ) {
+        const auto lastLine = firstLine_ + getNbVisibleLines();
         overview_->updateCurrentPosition( firstLine_, lastLine );
+    }
 
     // Are we hovering over a new line?
-    const auto mousePos = mapFromGlobal( QCursor::pos() );
+    const auto mousePos = mapFromGlobal( QCursor::pos( activeScreen( this ) ) );
     considerMouseHovering( mousePos.x(), mousePos.y() );
 
     // Redraw
@@ -946,7 +1207,7 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     const auto wholeHeight = static_cast<int>( getNbVisibleLines().get() ) * charHeight_;
     // Height in pixels of the "pull to follow" bottom bar.
     const auto pullToFollowHeight
-        = mapPullToFollowLength( followElasticHook_.length() )
+        = mapPullToFollowLength( followElasticHook_.size() )
           + ( followElasticHook_.isHooked()
                   ? ( wholeHeight - viewport()->height() ) + PullToFollowHookedHeight
                   : 0 );
@@ -965,7 +1226,8 @@ void AbstractLogView::paintEvent( QPaintEvent* paintEvent )
     // This is to cover the special case where there is less than a screenful
     // worth of data, we want to see the document from the top, rather than
     // pushing the first couple of lines above the viewport.
-    if ( followElasticHook_.isHooked() && ( logData_->getNbLine() < getNbVisibleLines() ) ) {
+    if ( followElasticHook_.isHooked()
+         && ( logData_->getNbLine() + LinesCount( 1 ) < getNbVisibleLines() ) ) {
         drawingTopOffset_ = 0;
         drawingTopPosition += ( wholeHeight - viewport()->height() ) + PullToFollowHookedHeight;
         drawingPullToFollowTopPosition
@@ -1047,13 +1309,13 @@ void AbstractLogView::searchUsingFunction( QuickFindSearchFn searchFunction )
     ( quickFind_->*searchFunction )( selection_, quickFindPattern_->getMatcher() );
 }
 
-void AbstractLogView::setQuickFindResult( bool hasMatch, Portion portion )
+void AbstractLogView::setQuickFindResult( bool hasMatch, const Portion& portion )
 {
     if ( portion.isValid() ) {
         LOG_DEBUG << "search " << portion.line();
         displayLine( portion.line() );
         selection_.selectPortion( portion );
-        emit updateLineNumber( portion.line() );
+        Q_EMIT newSelection( portion.line(), 1_lcount, 0_lcol, 0_length );
     }
     else if ( !hasMatch ) {
         selection_.clear();
@@ -1083,7 +1345,7 @@ void AbstractLogView::incrementallySearchBackward()
 void AbstractLogView::incrementalSearchAbort()
 {
     selection_ = quickFind_->incrementalSearchAbort();
-    emit changeQuickFind( "", QuickFindMux::Forward );
+    Q_EMIT changeQuickFind( "", QuickFindMux::Forward );
 }
 
 void AbstractLogView::incrementalSearchStop()
@@ -1122,6 +1384,13 @@ void AbstractLogView::followSet( bool checked )
         jumpToBottom();
 }
 
+void AbstractLogView::textWrapSet( bool checked )
+{
+    useTextWrap_ = checked;
+    updateScrollBars();
+    forceRefresh();
+}
+
 void AbstractLogView::refreshOverview()
 {
     assert( overviewWidget_ );
@@ -1151,7 +1420,7 @@ void AbstractLogView::addToSearch()
 {
     if ( selection_.isPortion() ) {
         LOG_DEBUG << "AbstractLogView::addToSearch()";
-        emit addToSearch( selection_.getSelectedText( logData_ ) );
+        Q_EMIT addToSearch( selection_.getSelectedText( logData_ ) );
     }
     else {
         LOG_ERROR << "AbstractLogView::addToSearch called for a wrong type of selection";
@@ -1163,7 +1432,7 @@ void AbstractLogView::replaceSearch()
 {
     if ( selection_.isPortion() ) {
         LOG_DEBUG << "AbstractLogView::replaceSearch()";
-        emit replaceSearch( selection_.getSelectedText( logData_ ) );
+        Q_EMIT replaceSearch( selection_.getSelectedText( logData_ ) );
     }
     else {
         LOG_ERROR << "AbstractLogView::replaceSearch called for a wrong type of selection";
@@ -1174,7 +1443,7 @@ void AbstractLogView::excludeFromSearch()
 {
     if ( selection_.isPortion() ) {
         LOG_DEBUG << "AbstractLogView::excludeFromSearch()";
-        emit excludeFromSearch( selection_.getSelectedText( logData_ ) );
+        Q_EMIT excludeFromSearch( selection_.getSelectedText( logData_ ) );
     }
     else {
         LOG_ERROR << "AbstractLogView::excludeFromSearch called for a wrong type of selection";
@@ -1186,8 +1455,8 @@ void AbstractLogView::findNextSelected()
 {
     // Use the selected 'word' and search forward
     if ( selection_.isPortion() ) {
-        emit changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Forward );
-        emit searchNext();
+        Q_EMIT changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Forward );
+        Q_EMIT searchNext();
     }
 }
 
@@ -1195,19 +1464,31 @@ void AbstractLogView::findNextSelected()
 void AbstractLogView::findPreviousSelected()
 {
     if ( selection_.isPortion() ) {
-        emit changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Backward );
-        emit searchNext();
+        Q_EMIT changeQuickFind( selection_.getSelectedText( logData_ ), QuickFindMux::Backward );
+        Q_EMIT searchNext();
     }
 }
 
 // Copy the selection to the clipboard
 void AbstractLogView::copy()
 {
+
     try {
-        auto clipboard = QApplication::clipboard();
         auto text = selection_.getSelectedText( logData_ );
         text.replace( QChar::Null, QChar::Space );
-        clipboard->setText( text );
+        sendTextToClipboard( text );
+    } catch ( std::exception& err ) {
+        LOG_ERROR << "failed to copy data to clipboard " << err.what();
+    }
+}
+
+// Copy the selection with line numbers to the clipboard
+void AbstractLogView::copyWithLineNumbers()
+{
+    try {
+        auto text = selection_.getSelectedText( logData_, true );
+        text.replace( QChar::Null, QChar::Space );
+        sendTextToClipboard( text );
     } catch ( std::exception& err ) {
         LOG_ERROR << "failed to copy data to clipboard " << err.what();
     }
@@ -1217,18 +1498,39 @@ void AbstractLogView::markSelected()
 {
     auto lines = selection_.getLines();
     if ( !lines.empty() ) {
-        emit markLines( lines );
+        Q_EMIT markLines( lines );
     }
 }
 
 void AbstractLogView::saveToFile()
+{
+    auto start = 0_lnum;
+    const auto totalLines = logData_->getNbLine();
+    auto end = LineNumber{ totalLines.get() };
+
+    saveLinesToFile( start, end );
+}
+
+void AbstractLogView::saveSelectedToFile()
+{
+    const auto selectedLines = selection_.getLines();
+    if ( selectedLines.empty() ) {
+        return;
+    }
+
+    const auto start = selectedLines.front();
+    const auto lastLine = selectedLines.back();
+    const auto end = lastLine + 1_lcount;
+    saveLinesToFile( start, end );
+}
+
+void AbstractLogView::saveLinesToFile( LineNumber begin, LineNumber end )
 {
     auto filename = QFileDialog::getSaveFileName( this, "Save content" );
     if ( filename.isEmpty() ) {
         return;
     }
 
-    const auto totalLines = logData_->getNbLine();
     QSaveFile saveFile{ filename };
     saveFile.open( QIODevice::WriteOnly | QIODevice::Truncate );
     if ( !saveFile.isOpen() ) {
@@ -1237,19 +1539,18 @@ void AbstractLogView::saveToFile()
     }
 
     QProgressDialog progressDialog( this );
-    progressDialog.setLabelText( QString( "Saving content to %1" ).arg( filename ) );
-
-    std::vector<std::pair<LineNumber, LinesCount>> offsets;
-    auto lineOffset = 0_lnum;
+    progressDialog.setLabelText( tr( "Saving content to %1" ).arg( filename ) );
+    klogg::vector<std::pair<LineNumber, LinesCount>> offsets;
+    auto lineOffset = begin;
     const auto chunkSize = 5000_lcount;
+    offsets.reserve( ( end - ( lineOffset + chunkSize ) ).get() );
 
-    for ( ; lineOffset + chunkSize < LineNumber( totalLines.get() );
-          lineOffset += LineNumber( chunkSize.get() ) ) {
+    for ( ; lineOffset + chunkSize < end; lineOffset += LinesCount( chunkSize.get() ) ) {
         offsets.emplace_back( lineOffset, chunkSize );
     }
-    offsets.emplace_back( lineOffset, LinesCount( totalLines.get() % chunkSize.get() ) );
+    offsets.emplace_back( lineOffset, LinesCount( ( end - lineOffset ).get() % chunkSize.get() ) );
 
-    QTextCodec* codec = logData_->getDisplayEncoding();
+    const QTextCodec* codec = logData_->getDisplayEncoding();
     if ( !codec ) {
         codec = QTextCodec::codecForName( "utf-8" );
     }
@@ -1261,7 +1562,7 @@ void AbstractLogView::saveToFile()
              [ &interruptRequest ]() { interruptRequest.set(); } );
 
     tbb::flow::graph saveFileGraph;
-    using LinesData = std::pair<std::vector<QString>, bool>;
+    using LinesData = std::pair<klogg::vector<QString>, bool>;
     auto lineReader = tbb::flow::input_node<LinesData>(
         saveFileGraph,
         [ this, &offsets, &interruptRequest, &progressDialog, offsetIndex = 0u,
@@ -1294,12 +1595,11 @@ void AbstractLogView::saveToFile()
 
     auto lineWriter = tbb::flow::function_node<LinesData, tbb::flow::continue_msg>(
         saveFileGraph, 1,
-        [ &interruptRequest, &codec, &saveFile, &progressDialog,
-          linesCount = 0u ]( const LinesData& lines ) mutable {
+        [ &interruptRequest, &codec, &saveFile,
+          &progressDialog ]( const LinesData& lines ) mutable {
             if ( !lines.second ) {
                 if ( !interruptRequest ) {
                     saveFile.commit();
-                    linesCount++;
                 }
 
                 progressDialog.finished( 0 );
@@ -1316,8 +1616,6 @@ void AbstractLogView::saveToFile()
                     interruptRequest.set();
                     return tbb::flow::continue_msg{};
                 }
-
-                linesCount++;
             }
             return tbb::flow::continue_msg{};
         } );
@@ -1335,7 +1633,7 @@ void AbstractLogView::updateSearchLimits()
 {
     forceRefresh();
 
-    emit changeSearchLimits( searchStart_, searchEnd_ );
+    Q_EMIT changeSearchLimits( searchStart_, searchEnd_ );
 }
 
 void AbstractLogView::setSearchStart()
@@ -1384,7 +1682,7 @@ void AbstractLogView::updateData()
     // Check the top Line is within range
     if ( firstLine_ >= lastLineNumber ) {
         firstLine_ = 0_lnum;
-        firstCol_ = 0;
+        firstCol_ = 0_lcol;
         verticalScrollBar()->setValue( 0 );
         horizontalScrollBar()->setValue( 0 );
     }
@@ -1395,9 +1693,6 @@ void AbstractLogView::updateData()
     // Adapt the scroll bars to the new content
     updateScrollBars();
 
-    // Calculate the index of the last line shown
-    const LineNumber lastLine = qMin( lastLineNumber, firstLine_ + getNbVisibleLines() );
-
     // Reset the QuickFind in case we have new stuff to search into
     quickFind_->resetLimits();
 
@@ -1405,8 +1700,11 @@ void AbstractLogView::updateData()
         jumpToBottom();
 
     // Update the overview if we have one
-    if ( overview_ != nullptr )
+    if ( overview_ != nullptr ) {
+        // Calculate the index of the last line shown
+        const LineNumber lastLine = qMin( lastLineNumber, firstLine_ + getNbVisibleLines() );
         overview_->updateCurrentPosition( firstLine_, lastLine );
+    }
 
     forceRefresh();
 }
@@ -1443,9 +1741,11 @@ void AbstractLogView::updateDisplaySize()
 
     // Our text area cache is now invalid
     textAreaCache_.invalid_ = true;
-    textAreaCache_.pixmap_ = QPixmap{ viewport()->width() * viewport()->devicePixelRatio(),
-                                      static_cast<int32_t>( getNbVisibleLines().get() )
-                                          * charHeight_ * viewport()->devicePixelRatio() };
+    textAreaCache_.pixmap_ = QPixmap{
+        static_cast<int>( std::ceil( viewport()->width() * viewport()->devicePixelRatio() ) ),
+        static_cast<int>( std::ceil( static_cast<int>( getNbVisibleLines().get() ) * charHeight_
+                                     * viewport()->devicePixelRatio() ) )
+    };
     textAreaCache_.pixmap_.setDevicePixelRatio( viewport()->devicePixelRatio() );
 }
 
@@ -1454,7 +1754,7 @@ LineNumber AbstractLogView::getTopLine() const
     return firstLine_;
 }
 
-QString AbstractLogView::getSelection() const
+QString AbstractLogView::getSelectedText() const
 {
     return selection_.getSelectedText( logData_ );
 }
@@ -1483,9 +1783,21 @@ void AbstractLogView::selectAndDisplayLine( LineNumber line )
 {
     disableFollow();
     selection_.selectLine( line );
+    selectionStartPos_ = FilePosition{ line, 0_lcol };
+    selectionCurrentEndPos_ = selectionStartPos_;
     displayLine( line );
-    emit updateLineNumber( line );
-    emit newSelection( line );
+    Q_EMIT newSelection( line, 1_lcount, 0_lcol, 0_length );
+}
+
+void AbstractLogView::selectPortionAndDisplayLine( LineNumber line, LinesCount nLines,
+                                                   LineColumn startCol, LineLength nSymbols )
+{
+    disableFollow();
+    selection_.selectLine( line );
+    selectionStartPos_ = FilePosition{ line, startCol };
+    selectionCurrentEndPos_ = FilePosition{ line, startCol + nSymbols };
+    displayLine( line );
+    Q_EMIT newSelection( line, nLines, startCol, nSymbols );
 }
 
 // The difference between this function and displayLine() is quite
@@ -1530,57 +1842,90 @@ LinesCount AbstractLogView::getNbVisibleLines() const
 }
 
 // Returns the number of columns visible in the viewport
-int AbstractLogView::getNbVisibleCols() const
+LineLength AbstractLogView::getNbVisibleCols() const
 {
-    return ( viewport()->width() - leftMarginPx_ ) / charWidth_ + 1;
+    const auto scrollBarWidth = verticalScrollBar()->isVisible() ? verticalScrollBar()->width() : 0;
+    return LineLength{ ( viewport()->width() - leftMarginPx_ - scrollBarWidth ) / charWidth_ + 1 };
 }
 
 // Converts the mouse x, y coordinates to the line number in the file
 OptionalLineNumber AbstractLogView::convertCoordToLine( int yPos ) const
 {
-    const auto offset = ( yPos - drawingTopOffset_ ) / charHeight_;
-    if ( offset >= 0 ) {
-        return firstLine_ + LinesCount( static_cast<LinesCount::UnderlyingType>( offset ) );
+    const auto offset = std::abs( ( yPos - drawingTopOffset_ ) / charHeight_ );
+    const auto wrappedLineInfoIndex = static_cast<size_t>( std::floor( offset ) );
+    if ( wrappedLineInfoIndex < wrappedLinesNumbers_.size() && !wrappedLinesNumbers_.empty() ) {
+        return wrappedLinesNumbers_[ wrappedLineInfoIndex ].first;
     }
-
-    if ( firstLine_.get() < static_cast<LineNumber::UnderlyingType>( qAbs( offset ) ) ) {
-        return {};
+    else {
+        return OptionalLineNumber{};
     }
-
-    return firstLine_ - LinesCount( static_cast<LinesCount::UnderlyingType>( offset ) );
 }
 
 // Converts the mouse x, y coordinates to the char coordinates (in the file)
 // This function ensure the pos exists in the file.
-AbstractLogView::FilePos AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
+FilePosition AbstractLogView::convertCoordToFilePos( const QPoint& pos ) const
 {
-    auto line = convertCoordToLine( pos.y() ).value_or( LineNumber{} );
+    const auto offset = std::abs( ( pos.y() - drawingTopOffset_ ) / charHeight_ );
+
+    if ( wrappedLinesNumbers_.empty() ) {
+        return FilePosition{ 0_lnum, 0_lcol };
+    }
+
+    const auto wrappedLineInfoIndex
+        = wrappedLinesNumbers_.size() > 1
+              ? std::clamp( static_cast<size_t>( std::floor( offset ) ), size_t{ 0 },
+                            wrappedLinesNumbers_.size() - 1 )
+              : 0;
+
+    auto [ line, wrappedLine ] = wrappedLinesNumbers_[ wrappedLineInfoIndex ];
     if ( line >= logData_->getNbLine() )
         line = LineNumber( logData_->getNbLine().get() ) - 1_lcount;
 
     const auto lineText = logData_->getExpandedLineString( line );
-    const auto visibleText = lineText.midRef( firstCol_, getNbVisibleCols() + 1 );
+    if ( lineText.size() <= 1 ) {
+        return FilePosition{ line, 0_lcol };
+    }
 
-    std::vector<int> possibleColumns( static_cast<size_t>( visibleText.length() ) );
-    std::iota( possibleColumns.begin(), possibleColumns.end(), 0 );
+    WrappedLinesView::WrappedString visibleText;
+    if ( useTextWrap_ ) {
+        WrappedLinesView wrapped{ lineText, getNbVisibleCols() };
+        visibleText = wrapped.wrappedLines_[ wrappedLine ];
+    }
+    else {
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+        visibleText = QStringView( lineText ).mid( firstCol_.get(), getNbVisibleCols().get() );
+#else
+        visibleText = QStringRef( &lineText ).mid( firstCol_.get(), getNbVisibleCols().get() );
+#endif
+    }
+
+    klogg::vector<LineColumn> possibleColumns( static_cast<size_t>( visibleText.size() ) );
+    std::iota( possibleColumns.begin(), possibleColumns.end(), 0_lcol );
 
     const auto columnIt = std::lower_bound(
         possibleColumns.cbegin(), possibleColumns.cend(), pos,
-        [ this, &visibleText ]( int c, const QPoint& p ) {
+        [ this, &visibleText ]( LineColumn c, const QPoint& p ) {
             const auto width
-                = textWidth( pixmapFontMetrics_, visibleText.left( c ).toString() ) + leftMarginPx_;
+                = textWidth( pixmapFontMetrics_, visibleText.left( c.get() ) ) + leftMarginPx_;
 
             return width < p.x();
         } );
 
-    const auto length = lineText.length();
+    const auto length
+        = LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>( visibleText.size() ) };
 
-    auto column = columnIt != possibleColumns.end() ? *columnIt : length;
-    column += ( firstCol_ - 1 );
-    column = std::clamp( column, 0, length - 1 );
+    auto column = ( columnIt != possibleColumns.end() ? *columnIt : length ) - 1_length;
+    if ( useTextWrap_ ) {
+        column += LineLength{ getNbVisibleCols().get() * static_cast<int>( wrappedLine ) };
+    }
+    else {
+        column += LineLength{ firstCol_.get() };
+    }
+
+    column = std::clamp( column, 0_lcol, LineColumn( lineText.size() ) - 1_length );
 
     LOG_DEBUG << "AbstractLogView::convertCoordToFilePos col=" << column << " line=" << line;
-    return FilePos{ line, column };
+    return FilePosition{ line, column };
 }
 
 // Makes the widget adjust itself to display the passed line.
@@ -1598,7 +1943,8 @@ void AbstractLogView::displayLine( LineNumber line )
 
     const auto portion = selection_.getPortionForLine( line );
     if ( portion.isValid() ) {
-        horizontalScrollBar()->setValue( portion.endColumn() - getNbVisibleCols() + 1 );
+        horizontalScrollBar()->setValue( type_safe::narrow_cast<int>(
+            portion.endColumn().get() - getNbVisibleCols().get() + 1 ) );
     }
 }
 
@@ -1624,8 +1970,10 @@ void AbstractLogView::moveSelection( LinesCount delta, bool isDeltaNegative )
     // Select and display the new line
     selection_.selectLine( newLine );
     displayLine( newLine );
-    emit updateLineNumber( newLine );
-    emit newSelection( newLine );
+    selectionStartPos_ = FilePosition{ newLine, 0_lcol };
+    selectionCurrentEndPos_ = selectionStartPos_;
+    Q_EMIT newSelection( newLine, selection_.getSelectedLinesCount(), 0_lcol,
+                         LineLength{ getSelectedText().size() } );
 }
 
 // Make the start of the lines visible
@@ -1634,18 +1982,24 @@ void AbstractLogView::jumpToStartOfLine()
     horizontalScrollBar()->setValue( 0 );
 }
 
+LineLength AbstractLogView::maxLineLength( const klogg::vector<LineNumber>& lines ) const
+{
+    const auto longestLine = std::max_element(
+        lines.cbegin(), lines.cend(), [ this ]( const auto& lhs, const auto& rhs ) {
+            const auto lhsLength = logData_->getLineLength( lhs );
+            const auto rhsLength = logData_->getLineLength( rhs );
+            return lhsLength < rhsLength;
+        } );
+
+    return logData_->getLineLength( LineNumber( *longestLine ) );
+}
+
 // Make the end of the lines in the selection visible
 void AbstractLogView::jumpToEndOfLine()
 {
     const auto selection = selection_.getLines();
-
-    // Search the longest line in the selection
-    const auto maxLength = std::transform_reduce(
-        selection.cbegin(), selection.cend(), 0_length,
-        []( auto acc, auto next ) { return std::max( acc, next ); },
-        [ this ]( auto line ) { return logData_->getLineLength( LineNumber( line ) ); } );
-
-    horizontalScrollBar()->setValue( maxLength.get() - getNbVisibleCols() );
+    horizontalScrollBar()->setValue( type_safe::narrow_cast<int>( maxLineLength( selection ).get()
+                                                                  - getNbVisibleCols().get() ) );
 }
 
 // Make the end of the lines on the screen visible
@@ -1653,15 +2007,14 @@ void AbstractLogView::jumpToRightOfScreen()
 {
     const auto nbVisibleLines = getNbVisibleLines();
 
-    std::vector<LineNumber::UnderlyingType> visibleLinesNumbers( nbVisibleLines.get() );
+    klogg::vector<LineNumber::UnderlyingType> visibleLinesNumbers( nbVisibleLines.get() );
     std::iota( visibleLinesNumbers.begin(), visibleLinesNumbers.end(), firstLine_.get() );
 
-    const auto maxLength = std::transform_reduce(
-        visibleLinesNumbers.cbegin(), visibleLinesNumbers.cend(), 0_length,
-        []( auto acc, auto next ) { return std::max( acc, next ); },
-        [ this ]( const auto& line ) { return logData_->getLineLength( LineNumber( line ) ); } );
-
-    horizontalScrollBar()->setValue( maxLength.get() - getNbVisibleCols() );
+    klogg::vector<LineNumber> visibleLines( nbVisibleLines.get() );
+    std::transform( visibleLinesNumbers.cbegin(), visibleLinesNumbers.cend(), visibleLines.begin(),
+                    []( auto number ) { return LineNumber{ number }; } );
+    horizontalScrollBar()->setValue( type_safe::narrow_cast<int>(
+        maxLineLength( visibleLines ).get() - getNbVisibleCols().get() ) );
 }
 
 // Jump to the first line
@@ -1675,9 +2028,10 @@ void AbstractLogView::jumpToTop()
 // Jump to the last line
 void AbstractLogView::jumpToBottom()
 {
-    const auto newTopLine = ( logData_->getNbLine().get() < getNbVisibleLines().get() )
-                                ? 0
-                                : logData_->getNbLine().get() - getNbVisibleLines().get() + 1;
+    const auto newTopLine
+        = ( logData_->getNbLine().get() < getNbVisibleLines().get() )
+              ? 0
+              : logData_->getNbLine().get() - getNbBottomWrappedVisibleLines().get() + 1;
 
     // This will also trigger a scrollContents event
     verticalScrollBar()->setValue( lineNumberToVerticalScroll( LineNumber( newTopLine ) ) );
@@ -1686,11 +2040,11 @@ void AbstractLogView::jumpToBottom()
 }
 
 // Select the word under the given position
-void AbstractLogView::selectWordAtPosition( const FilePos& pos )
+void AbstractLogView::selectWordAtPosition( const FilePosition& pos )
 {
-    const QString line = logData_->getExpandedLineString( pos.line );
+    const QString line = logData_->getExpandedLineString( pos.line() );
 
-    const int clickPos = pos.column;
+    const int clickPos = type_safe::narrow_cast<int>( pos.column().get() );
 
     const auto isWordSeparator = []( QChar c ) {
         return !c.isLetterOrNumber() && c.category() != QChar::Punctuation_Connector;
@@ -1702,12 +2056,14 @@ void AbstractLogView::selectWordAtPosition( const FilePos& pos )
 
     const auto wordStart
         = std::find_if( line.rbegin() + line.size() - clickPos, line.rend(), isWordSeparator );
-    const auto selectionStart = static_cast<int>( std::distance( line.begin(), wordStart.base() ) );
+    const auto selectionStart = LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
+        std::distance( line.begin(), wordStart.base() ) ) };
 
     const auto wordEnd = std::find_if( line.begin() + clickPos, line.end(), isWordSeparator );
-    const auto selectionEnd = static_cast<int>( std::distance( line.begin(), wordEnd ) - 1 );
+    const auto selectionEnd = LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
+        std::distance( line.begin(), wordEnd ) - 1 ) };
 
-    selection_.selectPortion( pos.line, selectionStart, selectionEnd );
+    selection_.selectPortion( pos.line(), selectionStart, selectionEnd );
     updateGlobalSelection();
     forceRefresh();
 }
@@ -1717,7 +2073,6 @@ void AbstractLogView::updateGlobalSelection()
 {
     try {
         auto clipboard = QApplication::clipboard();
-
         // Updating it only for "non-trivial" (range or portion) selections
         if ( !selection_.isSingleLine() )
             clipboard->setText( selection_.getSelectedText( logData_ ), QClipboard::Selection );
@@ -1726,18 +2081,38 @@ void AbstractLogView::updateGlobalSelection()
     }
 }
 
+void AbstractLogView::selectAndDisplayRange( FilePosition pos )
+{
+    disableFollow();
+    selection_.selectRange( selectionStartPos_.line(), pos.line() );
+    selectionCurrentEndPos_ = pos;
+    displayLine( pos.line() );
+    Q_EMIT newSelection( pos.line(), selection_.getSelectedLinesCount(), 0_lcol,
+                         LineLength{ getSelectedText().size() } );
+}
+
 // Create the pop-up menu
 void AbstractLogView::createMenu()
 {
     copyAction_ = new QAction( tr( "&Copy" ), this );
     // No text as this action title depends on the type of selection
-    connect( copyAction_, &QAction::triggered, [ this ]( auto ) { this->copy(); } );
+    connect( copyAction_, &QAction::triggered, this, [ this ]( auto ) { this->copy(); } );
+
+    copyWithLineNumbersAction_ = new QAction( tr( "Copy with line numbers" ), this );
+    // No text as this action title depends on the type of selection
+    connect( copyWithLineNumbersAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->copyWithLineNumbers(); } );
 
     markAction_ = new QAction( tr( "&Mark" ), this );
-    connect( markAction_, &QAction::triggered, [ this ]( auto ) { this->markSelected(); } );
+    connect( markAction_, &QAction::triggered, this, [ this ]( auto ) { this->markSelected(); } );
 
     saveToFileAction_ = new QAction( tr( "Save to file" ), this );
-    connect( saveToFileAction_, &QAction::triggered, [ this ]( auto ) { this->saveToFile(); } );
+    connect( saveToFileAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->saveToFile(); } );
+
+    saveSelectedToFileAction_ = new QAction( tr( "Save selected to file" ), this );
+    connect( saveSelectedToFileAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->saveSelectedToFile(); } );
 
     // For '#' and '*', shortcuts doesn't seem to work but
     // at least it displays them in the menu, we manually handle those keys
@@ -1745,7 +2120,8 @@ void AbstractLogView::createMenu()
     findNextAction_ = new QAction( tr( "Find &next" ), this );
     findNextAction_->setShortcut( Qt::Key_Asterisk );
     findNextAction_->setStatusTip( tr( "Find the next occurrence" ) );
-    connect( findNextAction_, &QAction::triggered, [ this ]( auto ) { this->findNextSelected(); } );
+    connect( findNextAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->findNextSelected(); } );
 
     findPreviousAction_ = new QAction( tr( "Find &previous" ), this );
     findPreviousAction_->setShortcut( tr( "/" ) );
@@ -1755,49 +2131,63 @@ void AbstractLogView::createMenu()
 
     replaceSearchAction_ = new QAction( tr( "&Replace search" ), this );
     replaceSearchAction_->setStatusTip( tr( "Replace the search expression with the selection" ) );
-    connect( replaceSearchAction_, &QAction::triggered,
+    connect( replaceSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->replaceSearch(); } );
 
     addToSearchAction_ = new QAction( tr( "&Add to search" ), this );
     addToSearchAction_->setStatusTip( tr( "Add the selection to the current search" ) );
-    connect( addToSearchAction_, &QAction::triggered, [ this ]( auto ) { this->addToSearch(); } );
+    connect( addToSearchAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->addToSearch(); } );
 
     excludeFromSearchAction_ = new QAction( tr( "&Exclude from search" ), this );
     excludeFromSearchAction_->setStatusTip( tr( "Excludes the selection from search" ) );
-    connect( excludeFromSearchAction_, &QAction::triggered,
+    connect( excludeFromSearchAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->excludeFromSearch(); } );
 
     setSearchStartAction_ = new QAction( tr( "Set search start" ), this );
-    connect( setSearchStartAction_, &QAction::triggered,
+    connect( setSearchStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSearchStart(); } );
 
     setSearchEndAction_ = new QAction( tr( "Set search end" ), this );
-    connect( setSearchEndAction_, &QAction::triggered, [ this ]( auto ) { this->setSearchEnd(); } );
+    connect( setSearchEndAction_, &QAction::triggered, this,
+             [ this ]( auto ) { this->setSearchEnd(); } );
 
     clearSearchLimitAction_ = new QAction( tr( "Clear search limits" ), this );
-    connect( clearSearchLimitAction_, &QAction::triggered,
+    connect( clearSearchLimitAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->clearSearchLimits(); } );
 
     setSelectionStartAction_ = new QAction( tr( "Set selection start" ), this );
-    connect( setSelectionStartAction_, &QAction::triggered,
+    connect( setSelectionStartAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionStart(); } );
 
     setSelectionEndAction_ = new QAction( tr( "Set selection end" ), this );
-    connect( setSelectionEndAction_, &QAction::triggered,
+    connect( setSelectionEndAction_, &QAction::triggered, this,
              [ this ]( auto ) { this->setSelectionEnd(); } );
 
     saveDefaultSplitterSizesAction_ = new QAction( tr( "Save splitter position" ), this );
-    connect( saveDefaultSplitterSizesAction_, &QAction::triggered,
-             [ this ]( auto ) { emit saveDefaultSplitterSizes(); } );
+    connect( saveDefaultSplitterSizesAction_, &QAction::triggered, this,
+             [ this ]( auto ) { Q_EMIT saveDefaultSplitterSizes(); } );
+
+    sendToScratchpadAction_ = new QAction( tr( "Send to scratchpad" ), this );
+    connect( sendToScratchpadAction_, &QAction::triggered, this,
+             [ this ]( auto ) { Q_EMIT sendSelectionToScratchpad(); } );
+
+    replaceInScratchpadAction_ = new QAction( tr( "Replace scratchpad" ), this );
+    connect( replaceInScratchpadAction_, &QAction::triggered, this,
+             [ this ]( auto ) { Q_EMIT replaceScratchpadWithSelection(); } );
 
     popupMenu_ = new QMenu( this );
-    highlightersMenu_ = popupMenu_->addMenu( "Highlighters" );
-    colorLabelsMenu_ = popupMenu_->addMenu( "Color labels" );
+    highlightersMenu_ = new HighlightersMenu( tr( "Highlighters" ) );
+    popupMenu_->addMenu( highlightersMenu_ );
+    colorLabelsMenu_ = popupMenu_->addMenu( tr( "Color labels" ) );
+
     popupMenu_->addSeparator();
     popupMenu_->addAction( markAction_ );
     popupMenu_->addSeparator();
     popupMenu_->addAction( copyAction_ );
-    popupMenu_->addAction( saveToFileAction_ );
+    popupMenu_->addAction( copyWithLineNumbersAction_ );
+    popupMenu_->addAction( sendToScratchpadAction_ );
+    popupMenu_->addAction( replaceInScratchpadAction_ );
     popupMenu_->addSeparator();
     popupMenu_->addAction( findNextAction_ );
     popupMenu_->addAction( findPreviousAction_ );
@@ -1814,6 +2204,8 @@ void AbstractLogView::createMenu()
     popupMenu_->addAction( setSelectionEndAction_ );
     popupMenu_->addSeparator();
     popupMenu_->addAction( saveDefaultSplitterSizesAction_ );
+    popupMenu_->addAction( saveToFileAction_ );
+    popupMenu_->addAction( saveSelectedToFileAction_ );
 }
 
 void AbstractLogView::considerMouseHovering( int xPos, int yPos )
@@ -1824,16 +2216,37 @@ void AbstractLogView::considerMouseHovering( int xPos, int yPos )
         // (possibly to highlight the overview)
         if ( line != lastHoveredLine_ ) {
             LOG_DEBUG << "Mouse moved in margin line: " << line;
-            emit mouseHoveredOverLine( *line );
+            Q_EMIT mouseHoveredOverLine( *line );
             lastHoveredLine_ = line;
         }
     }
     else {
         if ( lastHoveredLine_.has_value() ) {
-            emit mouseLeftHoveringZone();
+            Q_EMIT mouseLeftHoveringZone();
             lastHoveredLine_ = {};
         }
     }
+}
+
+LinesCount AbstractLogView::getNbBottomWrappedVisibleLines() const
+{
+    const auto visibleLines = getNbVisibleLines();
+
+    if ( useTextWrap_ ) {
+        const auto totalLines = logData_->getNbLine();
+
+        LinesCount wrappedLinesCount{ 0 };
+        LinesCount offset = 0_lcount;
+        for ( ; offset < visibleLines && offset < totalLines && wrappedLinesCount < visibleLines;
+              ++offset ) {
+            LineNumber line = LineNumber{ totalLines.get() } - offset;
+            wrappedLinesCount += LinesCount{ static_cast<LinesCount::UnderlyingType>(
+                logData_->getLineLength( line ).get() / getNbVisibleCols().get() + 1 ) };
+        }
+
+        return offset;
+    }
+    return visibleLines;
 }
 
 void AbstractLogView::updateScrollBars()
@@ -1842,18 +2255,24 @@ void AbstractLogView::updateScrollBars()
         verticalScrollBar()->setRange( 0, 0 );
     }
     else {
+        const auto visibleWrappedLines = getNbBottomWrappedVisibleLines();
+        const auto wrappedLinesScrollAdjust = ( getNbVisibleLines() - visibleWrappedLines ).get();
+
         verticalScrollBar()->setRange(
-            0, static_cast<int>( qMin(
-                   logData_->getNbLine().get() - getNbVisibleLines().get()
-                       + LinesCount::UnderlyingType{ 1 },
-                   static_cast<LinesCount::UnderlyingType>( std::numeric_limits<int>::max() ) ) ) );
+            0, static_cast<int>( std::min( logData_->getNbLine().get() - getNbVisibleLines().get()
+                                               + LinesCount::UnderlyingType{ 1 }
+                                               + wrappedLinesScrollAdjust,
+                                           maxValue<LinesCount>().get() ) ) );
     }
 
-    const int hScrollMaxValue
-        = qMax( 0, static_cast<int>( logData_->getMaxLength().get() ) - getNbVisibleCols() + 1 );
+    int64_t hScrollMaxValue = 0;
+    if ( !useTextWrap_ && logData_->getMaxLength().get() >= getNbVisibleCols().get() ) {
+        hScrollMaxValue = logData_->getMaxLength().get() - getNbVisibleCols().get() + 1;
+    }
 
-    horizontalScrollBar()->setRange( 0, hScrollMaxValue );
-    horizontalScrollBar()->setPageStep( getNbVisibleCols() * 7 / 8 );
+    horizontalScrollBar()->setRange( 0, type_safe::narrow_cast<int>( hScrollMaxValue ) );
+    horizontalScrollBar()->setPageStep(
+        type_safe::narrow_cast<int>( getNbVisibleCols().get() * 7 / 8 ) );
 }
 
 void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
@@ -1868,9 +2287,13 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
 
     const int fontHeight = charHeight_;
     const int fontAscent = painter->fontMetrics().ascent();
-    const int nbCols = getNbVisibleCols();
-    const int paintDeviceHeight = paintDevice->height() / viewport()->devicePixelRatio();
-    const int paintDeviceWidth = paintDevice->width() / viewport()->devicePixelRatio();
+    const LineLength nbVisibleCols = getNbVisibleCols();
+
+    const int paintDeviceHeight
+        = static_cast<int>( std::floor( paintDevice->height() / viewport()->devicePixelRatio() ) );
+    const int paintDeviceWidth
+        = static_cast<int>( std::floor( paintDevice->width() / viewport()->devicePixelRatio() ) );
+
     const QPalette& palette = viewport()->palette();
     const auto& highlighterSet = HighlighterSetCollection::get().currentActiveSet();
     const auto& quickHighlighters = HighlighterSetCollection::get().quickHighlighters();
@@ -1890,7 +2313,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     // the file has just changed)
     const auto linesInFile = logData_->getNbLine();
 
-    if ( firstLine_ > linesInFile )
+    if ( firstLine_ >= linesInFile )
         firstLine_ = LineNumber( linesInFile.get() ? linesInFile.get() - 1 : 0 );
 
     const auto nbLines = qMin( getNbVisibleLines(), linesInFile - LinesCount( firstLine_.get() ) );
@@ -1962,13 +2385,13 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
     // Lines to write
     const auto expandedLines = logData_->getExpandedLines( firstLine_, nbLines );
 
-    const auto mainSearchBackColor = Configuration::get().mainSearchBackColor();
     const auto highlightPatternMatches = Configuration::get().mainSearchHighlight();
     const auto variateHighlightPatternMatches = Configuration::get().variateMainSearchHighlight();
 
     std::optional<Highlighter> patternHighlight;
     if ( highlightPatternMatches && !searchPattern_.isBoolean && !searchPattern_.isExclude
          && !searchPattern_.pattern.isEmpty() ) {
+        const auto mainSearchBackColor = Configuration::get().mainSearchBackColor();
         patternHighlight = Highlighter{};
         patternHighlight->setHighlightOnlyMatch( true );
         patternHighlight->setVariateColors( variateHighlightPatternMatches );
@@ -1980,7 +2403,7 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         patternHighlight->setForeColor( Qt::black );
     }
 
-    std::vector<Highlighter> additionalHighlighters;
+    klogg::vector<Highlighter> additionalHighlighters;
     for ( auto i = 0u; i < quickHighlighters_.size(); ++i ) {
         const auto quickHighlighterIndex = static_cast<int>( i );
         if ( quickHighlighterIndex >= quickHighlighters.size() ) {
@@ -2000,16 +2423,16 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
                         } );
     }
 
-    // Then draw each line
+    // Position in pixel of the base line of the line to print
+    int yPos = 0;
+    wrappedLinesNumbers_.clear();
     for ( auto currentLine = 0_lcount; currentLine < nbLines; ++currentLine ) {
         const auto lineNumber = firstLine_ + currentLine;
         const QString logLine = logData_->getLineString( lineNumber );
 
-        // Position in pixel of the base line of the line to print
-        const int yPos = static_cast<int>( currentLine.get() ) * fontHeight;
         const int xPos = contentStartPosX + ContentMarginWidth;
 
-        std::vector<HighlightedMatch> highlighterMatches;
+        klogg::vector<HighlightedMatch> highlighterMatches;
 
         if ( selection_.isLineSelected( lineNumber ) && !selection_.isSingleLine() ) {
             // Reverse the selected line
@@ -2038,14 +2461,15 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             }
 
             if ( patternHighlight ) {
-                std::vector<HighlightedMatch> patternMatches;
+                klogg::vector<HighlightedMatch> patternMatches;
                 patternHighlight->matchLine( logLine, patternMatches );
                 highlighterMatches.insert( highlighterMatches.end(), patternMatches.begin(),
                                            patternMatches.end() );
             }
 
+            highlighterMatches.reserve( additionalHighlighters.size() );
             for ( const auto& highlighter : additionalHighlighters ) {
-                std::vector<HighlightedMatch> patternMatches;
+                klogg::vector<HighlightedMatch> patternMatches;
                 highlighter.matchLine( logLine, patternMatches );
                 highlighterMatches.insert( highlighterMatches.end(), patternMatches.begin(),
                                            patternMatches.end() );
@@ -2053,30 +2477,45 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         }
 
         const auto untabifyHighlight = [ &logLine ]( const auto& match ) {
-            const auto prefix = logLine.leftRef( match.startColumn() );
-            const auto expandedPrefixLength = untabify( prefix.toString() ).length();
-            auto startDelta = expandedPrefixLength - prefix.length();
+#if QT_VERSION >= QT_VERSION_CHECK( 5, 10, 0 )
+            const auto prefix = QStringView{ logLine }.left( match.startColumn().get() );
+            const auto matchPart
+                = QStringView{ logLine }.mid( match.startColumn().get(), match.size().get() );
+#else
+            const auto prefix = logLine.leftRef( match.startColumn().get() );
+            const auto matchPart = logLine.midRef( match.startColumn().get(), match.size().get() );
+#endif
+            const auto expandedPrefixLength = untabify( prefix.toString() ).size();
+            const LineLength startDelta
+                = LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                    expandedPrefixLength - prefix.size() ) };
 
-            const auto matchPart = logLine.midRef( match.startColumn(), match.length() );
-            const auto expandedMatchLength
-                = untabify( matchPart.toString(), expandedPrefixLength ).length();
-            auto lengthDelta = expandedMatchLength - matchPart.length();
+            const LineLength expandedMatchLength = LineLength{
+                untabify( matchPart.toString(),
+                          LineColumn{ type_safe::narrow_cast<LineColumn::UnderlyingType>(
+                              expandedPrefixLength ) } )
+                    .size()
+            };
 
-            return HighlightedMatch{ match.startColumn() + startDelta, match.length() + lengthDelta,
+            const auto lengthDelta
+                = expandedMatchLength
+                  - LineLength{ type_safe::narrow_cast<LineLength::UnderlyingType>(
+                      matchPart.size() ) };
+
+            return HighlightedMatch{ match.startColumn() + startDelta, match.size() + lengthDelta,
                                      match.foreColor(), match.backColor() };
         };
 
-        std::vector<HighlightedMatch> allHighlights;
+        klogg::vector<HighlightedMatch> allHighlights;
         allHighlights.reserve( highlighterMatches.size() );
         std::transform( highlighterMatches.cbegin(), highlighterMatches.cend(),
                         std::back_inserter( allHighlights ), untabifyHighlight );
 
         // string to print, cut to fit the length and position of the view
-        const QString expandedLine = expandedLines[ currentLine.get() ];
-        const QString cutLine = expandedLine.mid( firstCol_, nbCols );
+        const QString& expandedLine = expandedLines[ currentLine.get() ];
 
         // Has the line got elements to be highlighted
-        std::vector<HighlightedMatch> quickFindMatches;
+        klogg::vector<HighlightedMatch> quickFindMatches;
         quickFindPattern_->matchLine( expandedLine, quickFindMatches );
         allHighlights.insert( allHighlights.end(),
                               std::make_move_iterator( quickFindMatches.begin() ),
@@ -2085,78 +2524,102 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
         // Is there something selected in the line?
         const auto selectionPortion = selection_.getPortionForLine( lineNumber );
         if ( selectionPortion.isValid() ) {
-            allHighlights.emplace_back( selectionPortion.startColumn(), selectionPortion.length(),
+            allHighlights.emplace_back( selectionPortion.startColumn(), selectionPortion.size(),
                                         palette.color( QPalette::HighlightedText ),
                                         palette.color( QPalette::Highlight ) );
         }
 
-        painter->fillRect( xPos - ContentMarginWidth, yPos, viewport()->width(), fontHeight,
+        const auto wrappedLineLength
+            = useTextWrap_ ? nbVisibleCols : LineLength{ klogg::isize( expandedLine ) + 1 };
+        const WrappedLinesView wrappedLineView{ expandedLine, wrappedLineLength };
+        const auto finalLineHeight
+            = fontHeight * static_cast<int>( wrappedLineView.wrappedLinesCount() );
+        // LOG_INFO << "Draw line " << lineNumber << ": " << expandedLine;
+
+        painter->fillRect( xPos - ContentMarginWidth, yPos, viewport()->width(), finalLineHeight,
                            backColor );
 
-        if ( !allHighlights.empty() ) {
-            // We use the LineDrawer and its chunks because the
-            // line has to be somehow highlighted
-            LineDrawer lineDrawer( backColor );
-
-            auto foreColors = std::vector<QColor>( static_cast<size_t>( nbCols + 1 ), foreColor );
-            auto backColors = std::vector<QColor>( static_cast<size_t>( nbCols + 1 ), backColor );
+        LineDrawer lineDrawer( backColor );
+        if ( !allHighlights.empty() && !expandedLine.isEmpty() ) {
+            auto highlightColors = klogg::vector<std::pair<QColor, QColor>>(
+                static_cast<size_t>( expandedLine.size() ),
+                std::make_pair( foreColor, backColor ) );
 
             for ( const auto& match : allHighlights ) {
-                const auto start = match.startColumn() - firstCol_;
-                const auto end = start + match.length();
-
-                // Ignore matches that are *completely* outside view area
-                if ( ( start < 0 && end < 0 ) || start >= nbCols )
-                    continue;
-
-                const auto firstColumn = static_cast<size_t>( qMax( start, 0 ) );
-                const auto lastColumn
-                    = static_cast<size_t>( qMin( start + match.length(), nbCols ) );
-
-                for ( auto column = firstColumn; column < lastColumn; ++column ) {
-                    foreColors[ column ] = match.foreColor();
-                    backColors[ column ] = match.backColor();
+                auto matchEnd = match.startColumn() + match.size();
+                auto matchLengthInString = match.size();
+                if ( matchEnd >= LineColumn{ expandedLine.size() } ) {
+                    matchLengthInString
+                        = LineLength{ klogg::isize( expandedLine ) - match.startColumn().get() };
+                }
+                if ( matchLengthInString > 0_length ) {
+                    std::fill_n( highlightColors.begin() + match.startColumn().get(),
+                                 matchLengthInString.get(),
+                                 std::make_pair( match.foreColor(), match.backColor() ) );
                 }
             }
 
-            std::vector<LineChunk> highlightChunks;
-            auto lastMatchStart = 0;
-            for ( auto column = 0u; column < foreColors.size() - 1; ++column ) {
-                if ( foreColors[ column ] != foreColors[ column + 1 ]
-                     || backColors[ column ] != backColors[ column + 1 ] ) {
-                    lineDrawer.addChunk( { lastMatchStart, static_cast<int>( column ),
-                                           foreColors[ column ], backColors[ column ] } );
-                    lastMatchStart = static_cast<int>( column + 1 );
+            klogg::vector<LineColumn> columnIndexes( highlightColors.size() );
+            std::iota( columnIndexes.begin(), columnIndexes.end(), 0_lcol );
+
+            auto columnIndexIt = columnIndexes.begin();
+
+            const auto firstVisibleColumn
+                = std::clamp( useTextWrap_ ? 0_lcol : firstCol_, 0_lcol,
+                              LineColumn{ klogg::isize( expandedLine ) } );
+            std::advance( columnIndexIt, firstVisibleColumn.get() );
+            while ( columnIndexIt != columnIndexes.end() ) {
+                auto highlightDiffColumnIt = std::adjacent_find(
+                    columnIndexIt, columnIndexes.end(),
+                    [ &highlightColors ]( LineColumn lhsColumn, LineColumn rhsColumn ) {
+                        return highlightColors[ lhsColumn.get<size_t>() ]
+                               != highlightColors[ rhsColumn.get<size_t>() ];
+                    } );
+
+                if ( highlightDiffColumnIt != columnIndexes.end() ) {
+                    auto highlightChunkStart = *columnIndexIt;
+                    auto highlightChunkEnd = *highlightDiffColumnIt;
+                    lineDrawer.addChunk(
+                        highlightChunkStart, highlightChunkEnd,
+                        highlightColors[ highlightChunkStart.get<size_t>() ].first,
+                        highlightColors[ highlightChunkStart.get<size_t>() ].second );
+
+                    columnIndexIt = highlightDiffColumnIt + 1;
+                }
+                else {
+                    break;
                 }
             }
-            if ( lastMatchStart < nbCols ) {
-                lineDrawer.addChunk(
-                    { lastMatchStart, nbCols, foreColors.back(), backColors.back() } );
+            if ( columnIndexIt != columnIndexes.end() && !columnIndexes.empty() ) {
+                const auto lastHighlightChunkStart = *columnIndexIt;
+                const auto lastHighlightChunkEnd = *columnIndexes.rbegin();
+                if ( lastHighlightChunkEnd >= lastHighlightChunkStart ) {
+                    lineDrawer.addChunk( lastHighlightChunkStart, lastHighlightChunkEnd,
+                                         highlightColors.back().first,
+                                         highlightColors.back().second );
+                }
             }
-
-            lineDrawer.draw( painter.get(), xPos, yPos, viewport()->width(), cutLine,
-                             ContentMarginWidth );
         }
         else {
-            // Nothing to be highlighted, we print the whole line!
-            // painter->fillRect( xPos - ContentMarginWidth, yPos, viewport()->width(), fontHeight,
-            //                   backColor );
-            // (the rectangle is extended on the left to cover the small
-            // margin, it looks better (LineDrawer does the same) )
-            painter->setPen( foreColor );
-            painter->drawText( xPos, yPos + fontAscent, cutLine );
+            if ( useTextWrap_ ) {
+                lineDrawer.addChunk( 0_lcol, LineColumn{ expandedLine.size() }, foreColor,
+                                     backColor );
+            }
+            else {
+                lineDrawer.addChunk( firstCol_, firstCol_ + nbVisibleCols, foreColor, backColor );
+            }
         }
+        lineDrawer.draw( painter.get(), xPos, yPos, viewport()->width(), wrappedLineView,
+                         ContentMarginWidth );
 
         if ( ( selection_.isLineSelected( lineNumber ) && selection_.isSingleLine() )
              || selection_.getPortionForLine( lineNumber ).isValid() ) {
             auto selectionPen = QPen( palette.color( QPalette::Highlight ) );
-            selectionPen.setWidth( 3 );
+            selectionPen.setWidth( 1 );
             painter->setPen( selectionPen );
             painter->drawLine( xPos - ContentMarginWidth + 1, yPos, viewport()->width(), yPos );
-            selectionPen.setWidth( 5 );
-            painter->setPen( selectionPen );
-            painter->drawLine( xPos - ContentMarginWidth + 2, yPos + fontHeight,
-                               viewport()->width(), yPos + fontHeight );
+            painter->drawLine( xPos - ContentMarginWidth + 1, yPos + finalLineHeight - 1,
+                               viewport()->width(), yPos + finalLineHeight - 1 );
         }
 
         // Then draw the bullet
@@ -2205,6 +2668,14 @@ void AbstractLogView::drawTextArea( QPaintDevice* paintDevice )
             painter->drawText( lineNumberAreaStartX + LineNumberPadding, yPos + fontAscent,
                                lineNumberStr );
         }
+        for ( auto i = 0u; i < wrappedLineView.wrappedLinesCount(); ++i ) {
+            wrappedLinesNumbers_.push_back( std::make_pair( lineNumber, i ) );
+        }
+
+        yPos += finalLineHeight;
+        if ( yPos > viewport()->height() ) {
+            break;
+        }
     } // For each line
 }
 
@@ -2235,23 +2706,17 @@ QPixmap AbstractLogView::drawPullToFollowBar( int width, qreal pixelRatio )
 
 void AbstractLogView::disableFollow()
 {
-    emit followModeChanged( false );
+    Q_EMIT followModeChanged( false );
     followElasticHook_.hook( false );
-}
-
-void AbstractLogView::setHighlighterSet( QAction* action )
-{
-    saveCurrentHighlighterFromAction( action );
-    forceRefresh();
 }
 
 void AbstractLogView::setColorLabel( QAction* action )
 {
     if ( action->data().isValid() ) {
-        emit addColorLabel( static_cast<size_t>( action->data().toInt() ) );
+        Q_EMIT addColorLabel( static_cast<size_t>( action->data().toInt() ) );
     }
     else {
-        emit clearColorLabels();
+        Q_EMIT clearColorLabels();
     }
 }
 

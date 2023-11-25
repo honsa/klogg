@@ -54,11 +54,12 @@
 #include <QVBoxLayout>
 
 #include "colorlabelsmanager.h"
+#include "filteredview.h"
+#include "iconloader.h"
+#include "linetypes.h"
 #include "loadingstatus.h"
 #include "logdata.h"
 #include "logfiltereddata.h"
-#include "filteredview.h"
-#include "iconloader.h"
 #include "logmainview.h"
 #include "overview.h"
 #include "predefinedfilterscombobox.h"
@@ -107,9 +108,11 @@ class CrawlerWidget : public QSplitter,
     // Returns whether follow is enabled in this crawler
     bool isFollowEnabled() const;
 
+    bool isTextWrapEnabled() const;
+
     void registerShortcuts();
 
-  public slots:
+  public Q_SLOTS:
     // Stop the asynchoronous loading of the file if one is in progress
     // The file is identified by the view attached to it.
     void stopLoading();
@@ -147,7 +150,7 @@ class CrawlerWidget : public QSplitter,
 
     void changeEvent( QEvent* event ) override;
 
-  signals:
+  Q_SIGNALS:
     // Sent to signal the client load has progressed,
     // passing the completion percentage.
     void loadingProgressed( int progress );
@@ -156,12 +159,18 @@ class CrawlerWidget : public QSplitter,
     void loadingFinished( LoadingStatus status );
     // Sent when follow mode is enabled/disabled
     void followSet( bool checked );
+    // Sent when text wrap mode is enabled/disabled
+    void textWrapSet( bool checked );
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool follow );
     // Sent up when the current line number is updated
-    void updateLineNumber( LineNumber line );
+    void newSelection( LineNumber startLine, LinesCount nLines, LineColumn startCol,
+                       LineLength nSymbols );
     // Sent up when user wants to save new predefined filter from current search
     void saveCurrentSearchAsPredefinedFilter( QString newFilter );
+
+    void sendToScratchpad( QString );
+    void replaceDataInScratchpad( QString );
 
     // "auto-refresh" check has been changed
     void searchRefreshChanged( bool isRefreshing );
@@ -172,7 +181,10 @@ class CrawlerWidget : public QSplitter,
     // available) has changed
     void dataStatusChanged( DataStatus status );
 
-  private slots:
+    // Sent up when the current filtered view has been changed
+    void filteredViewChanged();
+
+  private Q_SLOTS:
     // Instructs the widget to start a search using the current search line.
     void startNewSearch();
     // Stop the currently ongoing search (if one exists)
@@ -186,13 +198,15 @@ class CrawlerWidget : public QSplitter,
     void updateFilteredView( LinesCount nbMatches, int progress, LineNumber initialPosition );
     // Called when a new line has been selected in the filtered view,
     // to instruct the main view to jump to the matching line.
-    void jumpToMatchingLine( LineNumber filteredLineNb );
+    void jumpToMatchingLine( LineNumber filteredLineNb, LinesCount nLines, LineColumn startCol,
+                             LineLength nSymbols );
     // Called when the main view is on a new line number
-    void updateLineNumberHandler( LineNumber line );
+    void updateLineNumberHandler( LineNumber line, LinesCount nLines, LineColumn startCol,
+                                  LineLength nSymbols );
     // Mark a line that has been clicked on the main (top) view.
-    void markLinesFromMain( const std::vector<LineNumber>& lines );
+    void markLinesFromMain( const klogg::vector<LineNumber>& lines );
     // Mark a line that has been clicked on the filtered (bottom) view.
-    void markLinesFromFiltered( const std::vector<LineNumber>& lines );
+    void markLinesFromFiltered( const klogg::vector<LineNumber>& lines );
 
     void loadingFinishedHandler( LoadingStatus status );
     // Manages the info lines to inform the user the file has changed.
@@ -251,6 +265,10 @@ class CrawlerWidget : public QSplitter,
     void addColorLabelToSelection( size_t label );
     void addNextColorLabelToSelection();
     void clearColorLabels();
+
+    void changeFilteredView(int tabIndex);
+    void closeFilteredView(int tabIndex);
+    void filteredViewDestroyed(QObject* view);
 
   private:
     // State machine holding the state of the search, used to allow/disallow
@@ -314,6 +332,7 @@ class CrawlerWidget : public QSplitter,
     void changeDataStatus( DataStatus status );
     void updateEncoding();
     void changeTopViewSize( int32_t delta );
+    void updatePredefinedFiltersWidget();
 
     // Reload predefined filters after changing settings
     void reloadPredefinedFilters() const;
@@ -325,6 +344,12 @@ class CrawlerWidget : public QSplitter,
     void resetStateOnSearchPatternChanges();
 
     void updateColorLabels( const ColorLabelsManager::QuickHighlightersCollection& labels );
+
+    void connectAllFilteredViewSlots( FilteredView* view);
+
+    void saveSplitterSizes() const;
+
+    void changeFontSize( bool increase );
 
     // Palette for error notification (yellow background)
     static const QPalette ErrorPalette;
@@ -343,6 +368,8 @@ class CrawlerWidget : public QSplitter,
 
     LogMainView* logMainView_;
     FilteredView* filteredView_;
+    std::unordered_map<FilteredView*, std::shared_ptr<LogFilteredData>> filteredViewsData_;
+    QTabWidget* tabbedFilteredView_;
 
     OverviewWidget* overviewWidget_;
 
@@ -357,7 +384,9 @@ class CrawlerWidget : public QSplitter,
 
     InfoLine* searchInfoLine_;
 
+    QToolButton* clearButton_;
     QToolButton* searchButton_;
+    QToolButton* keepSearchResultsButton_;
     QToolButton* stopButton_;
 
     QToolButton* matchCaseButton_;
@@ -395,7 +424,7 @@ class CrawlerWidget : public QSplitter,
     bool loadingInProgress_ = true;
     bool firstLoadDone_ = false;
 
-    std::vector<LineNumber> savedMarkedLines_;
+    klogg::vector<LineNumber> savedMarkedLines_;
 
     // Current encoding setting;
     std::optional<int> encodingMib_;

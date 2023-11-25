@@ -22,6 +22,9 @@
 
 #include <QTabBar>
 #include <QTabWidget>
+#include <qobjectdefs.h>
+#include <qtabbar.h>
+#include <qwidget.h>
 
 #include "loadingstatus.h"
 
@@ -29,6 +32,18 @@
 // group of CrawlerWidgets.
 // This is a very slightly customised QTabWidget, with
 // a particular style.
+
+class CrawlerTabBar : public QTabBar {
+  Q_OBJECT
+
+  Q_SIGNALS:
+    void showTabContextMenu(int tab, QPoint point);
+
+  protected:
+    void mouseReleaseEvent( QMouseEvent* ) override;
+
+};
+
 class TabbedCrawlerWidget : public QTabWidget {
     Q_OBJECT
   public:
@@ -71,15 +86,15 @@ class TabbedCrawlerWidget : public QTabWidget {
     void loadIcons();
     void updateIcon( int index );
 
-  private slots:
-    void showContextMenu( const QPoint& );
+  private Q_SLOTS:
+    void showContextMenu( int tab, QPoint globalPoint );
 
   private:
     QIcon olddata_icon_;
     QIcon newdata_icon_;
     QIcon newfiltered_icon_;
 
-    QTabBar myTabBar_;
+    CrawlerTabBar myTabBar_;
 };
 
 #endif

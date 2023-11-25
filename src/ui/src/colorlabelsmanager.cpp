@@ -20,7 +20,6 @@
 #include "colorlabelsmanager.h"
 #include "highlighterset.h"
 #include <algorithm>
-#include <cstddef>
 #include <vector>
 
 ColorLabelsManager::QuickHighlightersCollection ColorLabelsManager::colorLabels() const
@@ -33,6 +32,8 @@ ColorLabelsManager::QuickHighlightersCollection ColorLabelsManager::clear()
     for ( auto& quickHighlighters : quickHighlighters_ ) {
         quickHighlighters.clear();
     }
+    currentLabel_.reset();
+    
     return quickHighlighters_;
 }
 
@@ -88,7 +89,7 @@ ColorLabelsManager::updateColorLabel( size_t label, const QString& text, bool re
     }
 
     if ( !( wasHighlightedAnyLabel ) || ( wasHighlightedOtherLabel && replaceCurrent ) ) {
-        quickHighlighters_[ label ].append( std::move( text ) );
+        quickHighlighters_[ label ].append( text );
     }
 
     return quickHighlighters_;

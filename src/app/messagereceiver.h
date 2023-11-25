@@ -45,11 +45,11 @@ class MessageReceiver final : public QObject {
     {
     }
 
-  signals:
+  Q_SIGNALS:
     void loadFile( const QString& filename );
 
-  public slots:
-    void receiveMessage( quint32 instanceId, QByteArray message )
+  public Q_SLOTS:
+    void receiveMessage( const QByteArray& message )
     {
       
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
@@ -58,9 +58,7 @@ class MessageReceiver final : public QObject {
         const auto data = QJsonDocument::fromBinaryData( message ).toVariant().toMap();
 #endif
 
-        LOG_INFO << "Message from  " << instanceId << QJsonDocument::fromVariant(data).toJson();
-
-        Q_UNUSED( instanceId );
+        LOG_INFO << "Message " << QJsonDocument::fromVariant(data).toJson();
 
         if ( data[ "version" ].toString() != kloggVersion() ) {
             return;
@@ -69,7 +67,7 @@ class MessageReceiver final : public QObject {
         QStringList filenames = data[ "files" ].toStringList();
 
         for ( const auto& f : filenames ) {
-            emit loadFile( f );
+            Q_EMIT loadFile( f );
         }
     }
 };

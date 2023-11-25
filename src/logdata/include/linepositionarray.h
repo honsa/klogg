@@ -49,7 +49,7 @@ class SimpleLinePositionStorage {
   public:
     SimpleLinePositionStorage()
     {
-        storage_.reserve(10000);
+        storage_.reserve( 10000 );
     }
 
     SimpleLinePositionStorage( const SimpleLinePositionStorage& ) = delete;
@@ -58,13 +58,14 @@ class SimpleLinePositionStorage {
     SimpleLinePositionStorage( SimpleLinePositionStorage&& ) = default;
     SimpleLinePositionStorage& operator=( SimpleLinePositionStorage&& ) = default;
 
+    using Cache = void*;
     // Append the passed end-of-line to the storage
-    void append( LineOffset pos )
+    void append( OffsetInFile pos )
     {
         storage_.push_back( pos );
     }
 
-    void push_back( LineOffset pos )
+    void push_back( OffsetInFile pos )
     {
         append( pos );
     }
@@ -81,12 +82,12 @@ class SimpleLinePositionStorage {
     }
 
     // Element at index
-    LineOffset at( size_t i ) const
+    OffsetInFile at( size_t i, Cache* = nullptr ) const
     {
         return storage_.at( i );
     }
 
-    LineOffset at( LineNumber i ) const
+    OffsetInFile at( LineNumber i, Cache* = nullptr ) const
     {
         return at( i.get() );
     }
@@ -103,34 +104,29 @@ class SimpleLinePositionStorage {
         storage_.pop_back();
     }
 
-    operator const std::vector<LineOffset>&() const
+    operator const klogg::vector<OffsetInFile>&() const
     {
         return storage_;
     }
 
   private:
-    std::vector<LineOffset> storage_;
+    klogg::vector<OffsetInFile> storage_;
 };
 
 // This class is a list of end of lines position,
 // in addition to a list of uint64_t (positions within the files)
 // it can keep track of whether the final LF was added (for non-LF terminated
 // files) and remove it when more data are added.
-template <typename Storage> class LinePosition {
+template <typename Storage>
+class LinePosition {
   public:
-    template <typename> friend class LinePosition;
+    template <typename>
+    friend class LinePosition;
 
-    // Default constructor
-    LinePosition()
-        : fakeFinalLF_{ false }
-    {
-    }
-
-    // Copy constructor (slow: deleted)
+    LinePosition() = default;
     LinePosition( const LinePosition& ) = delete;
     LinePosition& operator=( const LinePosition& ) = delete;
 
-    // Move assignement
     LinePosition( LinePosition&& orig ) noexcept
     {
         *this = std::move( orig );
@@ -146,7 +142,7 @@ template <typename Storage> class LinePosition {
     // Add a new line position at the given position
     // Invariant: pos must be greater than the previous one
     // (this is NOT checked!)
-    inline void append( LineOffset pos )
+    inline void append( OffsetInFile pos )
     {
         if ( fakeFinalLF_ )
             array.pop_back();
@@ -166,15 +162,12 @@ template <typename Storage> class LinePosition {
     }
 
     // Extract an element
-    inline LineOffset at( LineNumber::UnderlyingType i ) const
+    inline OffsetInFile at( LineNumber::UnderlyingType i,
+                          typename Storage::Cache* lastPosition = nullptr ) const
     {
-        const auto pos = array.at( i );
+        const auto pos = array.at( i, lastPosition );
         LOG_DEBUG << "Line pos at " << i << " is " << pos;
         return pos;
-    }
-    inline LineOffset operator[]( LineNumber::UnderlyingType i ) const
-    {
-        return array.at( i );
     }
 
     // Set the presence of a fake final LF
@@ -203,7 +196,7 @@ template <typename Storage> class LinePosition {
 
   private:
     Storage array;
-    bool fakeFinalLF_;
+    bool fakeFinalLF_ = false;
 };
 
 // Use the non-optimised storage

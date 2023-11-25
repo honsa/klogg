@@ -36,15 +36,18 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "log.h"
+#include "containers.h"
 
 #include "infoline.h"
+
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QMenu>
 #include <QPainter>
+
+#include "clipboard.h"
 
 InfoLine::InfoLine()
 {
@@ -102,11 +105,11 @@ void InfoLine::contextMenuEvent( QContextMenuEvent* event )
     auto selectAll = menu.addAction( "Select all" );
 
     copySelection->setEnabled( this->hasSelectedText() );
-    connect( copySelection, &QAction::triggered,
-             [this]( auto ) { QApplication::clipboard()->setText( this->selectedText() ); } );
+    connect( copySelection, &QAction::triggered, this,
+             [ this ]( auto ) { sendTextToClipboard( this->selectedText() ); } );
 
-    connect( selectAll, &QAction::triggered,
-             [this]( auto ) { setSelection( 0, this->text().length() ); } );
+    connect( selectAll, &QAction::triggered, this,
+             [ this ]( auto ) { setSelection( 0, klogg::isize( this->text() ) ); } );
 
     menu.exec( event->globalPos() );
 }

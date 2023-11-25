@@ -30,7 +30,11 @@ class QWidget;
 class QShortcut;
 
 struct ShortcutAction {
-    static constexpr auto CrawlerChangeVisibility = "crawler.change_visibility_type";
+    static constexpr auto CrawlerChangeVisibilityForward = "crawler.change_visibility_type";
+    static constexpr auto CrawlerChangeVisibilityBackward = "crawler.change_visibility_type_backward";
+    static constexpr auto CrawlerChangeVisibilityToMarksAndMatches = "crawler.change_visibility_to_marks_and_matches";
+    static constexpr auto CrawlerChangeVisibilityToMarks = "crawler.change_visibility_to_marks";
+    static constexpr auto CrawlerChangeVisibilityToMatches = "crawler.change_visibility_to_matches";
     static constexpr auto CrawlerIncreseTopViewSize = "crawler.increase_top_view_size";
     static constexpr auto CrawlerDecreaseTopViewSize = "crawler.decrease_top_view_size";
 
@@ -50,6 +54,7 @@ struct ShortcutAction {
     static constexpr auto MainWindowFocusSearchInput = "qf.focus_search";
     static constexpr auto MainWindowClearFile = "mainwindow.clear_file";
     static constexpr auto MainWindowFollowFile = "mainwindow.follow_file";
+    static constexpr auto MainWindowTextWrap = "mainwindow.text_wrap";
     static constexpr auto MainWindowReload = "mainwindow.reload";
     static constexpr auto MainWindowStop = "mainwindow.stop";
     static constexpr auto MainWindowScratchpad = "mainwindow.scratchpad";
@@ -71,6 +76,7 @@ struct ShortcutAction {
     static constexpr auto LogViewScrollRight = "logview.scroll_right";
     static constexpr auto LogViewJumpToTop = "logview.jump_to_top";
     static constexpr auto LogViewJumpToButtom = "logview.jump_to_buttom";
+    static constexpr auto LogViewJumpToBottom = "logview.jump_to_bottom";
     static constexpr auto LogViewJumpToStartOfLine = "logview.jump_to_start_of_line";
     static constexpr auto LogViewJumpToEndOfLine = "logview.jump_to_end_of_line";
     static constexpr auto LogViewJumpToRightOfScreen = "logview.jump_to_right";
@@ -97,6 +103,15 @@ struct ShortcutAction {
     static constexpr auto LogViewClearColorLabels = "logview.clear_color_labels";
     static constexpr auto LogViewAddNextColorLabel = "logview.add_next_color_label";
 
+    static constexpr auto LogViewSendSelectionToScratchpad = "logview.send_selection_to_scratchpad";
+        static constexpr auto LogViewReplaceScratchpadWithSelection = "logview.replace_scratchpad_with_selection";
+
+    static constexpr auto LogViewAddToSearch = "logview.add_to_search";
+    static constexpr auto LogViewExcludeFromSearch = "logview.exclude_from_search";
+    static constexpr auto LogViewReplaceSearch = "logview.replace_search";
+    static constexpr auto LogViewSelectLinesUp = "logview.select_lines_up";
+    static constexpr auto LogViewSelectLinesDown = "logview.select_lines_down";
+    
     static const std::map<std::string, QStringList>& defaultShortcuts();
 
     static QStringList defaultShortcuts( const std::string& action );
@@ -109,7 +124,7 @@ struct ShortcutAction {
                                   QWidget* shortcutsParent, Qt::ShortcutContext context,
                                   const std::string& action, const std::function<void()>& func );
 
-    static void registerShortcut( const QString key,
+    static void registerShortcut( const QString& key,
                                   std::map<QString, QShortcut*>& shortcutsStorage,
                                   QWidget* shortcutsParent, Qt::ShortcutContext context,
                                   const std::function<void()>& func );

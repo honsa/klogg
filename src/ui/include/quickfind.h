@@ -46,6 +46,7 @@
 #include <QTime>
 
 #include "atomicflag.h"
+#include "linetypes.h"
 #include "qfnotifications.h"
 #include "quickfindpattern.h"
 #include "selection.h"
@@ -79,7 +80,7 @@ class SearchingNotifier : public QObject {
             sendNotification( line, nb_lines, backward );
     }
 
-  signals:
+  Q_SIGNALS:
     // Sent when the UI shall display a message to the user.
     void notify( const QFNotification& message );
 
@@ -106,7 +107,7 @@ class QuickFind : public QObject {
     // Make the object forget the 'no more match' flag.
     void resetLimits();
 
-  public slots:
+  public Q_SLOTS:
     // Used for incremental searches
     // Return the first occurrence of the passed pattern from the starting
     // point.  These searches don't change the starting point.
@@ -130,7 +131,7 @@ class QuickFind : public QObject {
 
     void stopSearch();
 
-  signals:
+  Q_SIGNALS:
     // Sent when the UI shall display a message to the user.
     void notify( const QFNotification& message );
     // Sent when the UI shall clear the notification.
@@ -138,7 +139,7 @@ class QuickFind : public QObject {
     // Sent when search is completed
     void searchDone( bool hasMatch, Portion selection );
 
-  private slots:
+  private Q_SLOTS:
     void sendNotification( QFNotification notification );
     void onSearchFutureReady();
 
@@ -151,23 +152,23 @@ class QuickFind : public QObject {
 
     class LastMatchPosition {
       public:
-        void set( LineNumber line, int column );
+        void set( LineNumber line, LineColumn column );
         void set( const FilePosition& position );
         void reset()
         {
             line_ = {};
-            column_ = -1;
+            column_ = LineColumn{-1};
         }
         // Does the passed position come after the recorded one
-        bool isLater( OptionalLineNumber line, int column ) const;
+        bool isLater( OptionalLineNumber line, LineColumn column ) const;
         bool isLater( const FilePosition& position ) const;
         // Does the passed position come before the recorded one
-        bool isSooner( OptionalLineNumber line, int column ) const;
+        bool isSooner( OptionalLineNumber line, LineColumn column ) const;
         bool isSooner( const FilePosition& position ) const;
 
       private:
         OptionalLineNumber line_;
-        int column_{ -1 };
+        LineColumn column_{ -1 };
     };
 
     class IncrementalSearchStatus {

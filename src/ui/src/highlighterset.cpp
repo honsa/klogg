@@ -48,6 +48,7 @@
 
 #include "crc32.h"
 #include "highlightersetedit.h"
+#include "linetypes.h"
 #include "log.h"
 #include "uuid.h"
 
@@ -167,7 +168,7 @@ std::pair<QColor, QColor> Highlighter::vairateColors( const QString& match ) con
     return std::make_pair( color_.foreColor.darker( factor ), color_.backColor.darker( factor ) );
 }
 
-bool Highlighter::matchLine( const QString& line, std::vector<HighlightedMatch>& matches ) const
+bool Highlighter::matchLine( const QString& line, klogg::vector<HighlightedMatch>& matches ) const
 {
     matches.clear();
 
@@ -181,18 +182,21 @@ bool Highlighter::matchLine( const QString& line, std::vector<HighlightedMatch>&
     while ( matchIterator.hasNext() ) {
         QRegularExpressionMatch match = matchIterator.next();
         if ( matchingRegex.captureCount() > 0 ) {
+            matches.reserve( static_cast<size_t>( match.lastCapturedIndex() ) );
             for ( int i = 1; i <= match.lastCapturedIndex(); ++i ) {
 
                 const auto colors = vairateColors( match.captured( i ) );
 
-                matches.emplace_back( match.capturedStart( i ), match.capturedLength( i ),
-                                      colors.first, colors.second );
+                matches.emplace_back( LineColumn{ match.capturedStart( i ) },
+                                      LineLength{ match.capturedLength( i ) }, colors.first,
+                                      colors.second );
             }
         }
         else {
             const auto colors = vairateColors( match.captured( 0 ) );
 
-            matches.emplace_back( match.capturedStart( 0 ), match.capturedLength( 0 ), colors.first,
+            matches.emplace_back( LineColumn{ match.capturedStart( 0 ) },
+                                  LineLength{ match.capturedLength( 0 ) }, colors.first,
                                   colors.second );
         }
     }
@@ -227,11 +231,11 @@ bool HighlighterSet::isEmpty() const
 }
 
 HighlighterMatchType HighlighterSet::matchLine( const QString& line,
-                                                std::vector<HighlightedMatch>& matches ) const
+                                                klogg::vector<HighlightedMatch>& matches ) const
 {
     auto matchType = HighlighterMatchType::NoMatch;
     for ( auto hl = highlighterList_.rbegin(); hl != highlighterList_.rend(); ++hl ) {
-        std::vector<HighlightedMatch> thisMatches;
+        klogg::vector<HighlightedMatch> thisMatches;
         if ( !hl->matchLine( line, thisMatches ) ) {
             continue;
         }
@@ -240,7 +244,7 @@ HighlighterMatchType HighlighterSet::matchLine( const QString& line,
             matchType = HighlighterMatchType::LineMatch;
 
             matches.clear();
-            matches.emplace_back( 0, line.length(), hl->foreColor(), hl->backColor() );
+            matches.emplace_back( 0_lcol, LineLength {line.size() }, hl->foreColor(), hl->backColor() );
         }
         else {
             if ( matchType != HighlighterMatchType::LineMatch ) {
@@ -518,15 +522,31 @@ void HighlighterSetCollection::retrieveFromStorage( QSettings& settings )
     }
 
     QList<QuickHighlighter> defaultLabels;
-    defaultLabels.append( { "Color label 1", { QColor{"#001e80"}, QColor{"#a1b7ff"} }, true } );
-    defaultLabels.append( { "Color label 2", { QColor{"#80005D"}, QColor{"#ffa1c6"} }, true } );
-    defaultLabels.append( { "Color label 3", { QColor{"#0f8000"}, QColor{"#acffa1"} }, true } );
-    defaultLabels.append( { "Color label 4", { QColor{"#806000"}, QColor{"#ffe8a1"} }, true } );
-    defaultLabels.append( { "Color label 5", { QColor{"#420080"}, QColor{"#d2a1ff"} }, true } );
-    defaultLabels.append( { "Color label 6", { QColor{"#007f80"}, QColor{"#a1feff"} }, true } );
-    defaultLabels.append( { "Color label 7", { QColor{"#004e80"}, QColor{"#a1dbff"} }, true } );
-    defaultLabels.append( { "Color label 8", { QColor{"#120080"}, QColor{"#a29ccf"} }, true } );
-    defaultLabels.append( { "Color label 9", { QColor{}, Qt::gray }, true } );
+    defaultLabels.append( { QApplication::tr( "Color label 1" ),
+                            { QColor{ "#001e80" }, QColor{ "#a1b7ff" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 2" ),
+                            { QColor{ "#80005D" }, QColor{ "#ffa1c6" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 3" ),
+                            { QColor{ "#0f8000" }, QColor{ "#acffa1" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 4" ),
+                            { QColor{ "#806000" }, QColor{ "#ffe8a1" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 5" ),
+                            { QColor{ "#420080" }, QColor{ "#d2a1ff" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 6" ),
+                            { QColor{ "#007f80" }, QColor{ "#a1feff" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 7" ),
+                            { QColor{ "#004e80" }, QColor{ "#a1dbff" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 8" ),
+                            { QColor{ "#120080" }, QColor{ "#a29ccf" } },
+                            true } );
+    defaultLabels.append( { QApplication::tr( "Color label 9" ), { QColor{}, Qt::gray }, true } );
 
     if ( quickHighlighters_.size() < defaultLabels.size() ) {
         LOG_WARNING << "Got " << quickHighlighters_.size() << " quick highlighters";

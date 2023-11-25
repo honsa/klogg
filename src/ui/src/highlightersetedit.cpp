@@ -100,16 +100,21 @@ HighlighterSetEdit::HighlighterSetEdit( QWidget* parent )
         upHighlighterButton->setIcon( iconLoader.load( "icons8-up-16" ) );
         downHighlighterButton->setIcon( iconLoader.load( "icons8-down-arrow-16" ) );
     } );
+
+    reset();
 }
 
 void HighlighterSetEdit::reset()
 {
-    // Start with all buttons disabled except 'add'
+    addHighlighterButton->setEnabled( false );
     removeHighlighterButton->setEnabled( false );
     upHighlighterButton->setEnabled( false );
     downHighlighterButton->setEnabled( false );
 
+    nameEdit->clear();
+    nameEdit->setEnabled(false);
     highlighterListWidget->clear();
+
     highlighterEdit_->reset();
 }
 
@@ -127,13 +132,15 @@ void HighlighterSetEdit::setHighlighters( HighlighterSet set )
         setCurrentRow( 0 );
     }
 
+    nameEdit->setEnabled(true);
     nameEdit->setText( highlighterSet_.name() );
+    addHighlighterButton->setEnabled(true);
 }
 
 void HighlighterSetEdit::setName( const QString& name )
 {
     highlighterSet_.name_ = name;
-    emit changed();
+    Q_EMIT changed();
 }
 
 void HighlighterSetEdit::addHighlighter()
@@ -149,7 +156,7 @@ void HighlighterSetEdit::addHighlighter()
 
     setCurrentRow( highlighterListWidget->count() - 1 );
 
-    emit changed();
+    Q_EMIT changed();
 }
 
 void HighlighterSetEdit::removeHighlighter()
@@ -175,7 +182,7 @@ void HighlighterSetEdit::removeHighlighter()
             }
         } );
 
-        emit changed();
+        Q_EMIT changed();
     }
 }
 
@@ -194,7 +201,7 @@ void HighlighterSetEdit::moveHighlighterUp()
             setCurrentRow( index - 1 );
         } );
 
-        emit changed();
+        Q_EMIT changed();
     }
 }
 
@@ -213,7 +220,7 @@ void HighlighterSetEdit::moveHighlighterDown()
             setCurrentRow( index + 1 );
         } );
 
-        emit changed();
+        Q_EMIT changed();
     }
 }
 
@@ -243,7 +250,7 @@ void HighlighterSetEdit::updatePropertyFields()
     }
     else {
         highlighterEdit_->reset();
-
+        
         removeHighlighterButton->setEnabled( false );
         upHighlighterButton->setEnabled( false );
         downHighlighterButton->setEnabled( false );
@@ -267,7 +274,7 @@ void HighlighterSetEdit::updateHighlighterProperties()
         highlighterListWidget->currentItem()->setBackground(
             QBrush( currentHighlighter.backColor() ) );
 
-        emit changed();
+        Q_EMIT changed();
     }
 }
 

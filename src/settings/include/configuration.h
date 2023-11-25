@@ -44,6 +44,7 @@
 #include <QFont>
 #include <QSettings>
 #include <qcolor.h>
+#include <string>
 #include <string_view>
 
 #include "persistable.h"
@@ -56,6 +57,7 @@ enum class SearchRegexpType {
 };
 
 enum class RegexpEngine { Hyperscan, QRegularExpression };
+static constexpr int MAX_RECENT_FILES = 25;
 
 // Configuration class containing everything in the "Settings" dialog
 class Configuration final : public Persistable<Configuration> {
@@ -69,6 +71,16 @@ class Configuration final : public Persistable<Configuration> {
     // Accesses the main font used for display
     QFont mainFont() const;
     void setMainFont( QFont newFont );
+
+    QString language() const
+    {
+        return language_;
+    }
+
+    void setLanguage( QString lang )
+    {
+        language_ = lang;
+    }
 
     // Accesses the regexp types
     SearchRegexpType mainRegexpType() const
@@ -416,6 +428,15 @@ class Configuration final : public Persistable<Configuration> {
         qfBackColor_ = color;
     }
 
+    bool qfIgnoreCase() const
+    {
+        return qfIgnoreCase_;
+    }
+    void setQfIgnoreCase( bool ignore )
+    {
+        qfIgnoreCase_ = ignore;
+    }
+
     std::map<std::string, QStringList> shortcuts() const
     {
         return shortcuts_;
@@ -432,6 +453,15 @@ class Configuration final : public Persistable<Configuration> {
     void setAllowFollowOnScroll( bool enable )
     {
         allowFollowOnScroll_ = enable;
+    }
+
+    bool useTextWrap() const
+    {
+        return useTextWrap_;
+    }
+    void setUseTextWrap( bool enable )
+    {
+        useTextWrap_ = enable;
     }
 
     bool autoRunSearchOnPatternChange() const
@@ -461,6 +491,19 @@ class Configuration final : public Persistable<Configuration> {
         hideAnsiColorSequences_ = hide;
     }
 
+    int defaultEncodingMib() const
+    {
+        return defaultEncodingMib_;
+    }
+    void setDefaultEncodingMib( int mib )
+    {
+        defaultEncodingMib_ = mib;
+    }
+
+    std::map<QString, QString> darkPalette() const {
+        return darkPalette_;
+    }
+
     // Reads/writes the current config in the QSettings object passed
     void saveToStorage( QSettings& settings ) const;
     void retrieveFromStorage( QSettings& settings );
@@ -471,6 +514,8 @@ class Configuration final : public Persistable<Configuration> {
     SearchRegexpType mainRegexpType_ = SearchRegexpType::ExtendedRegexp;
     SearchRegexpType quickfindRegexpType_ = SearchRegexpType::FixedString;
     bool quickfindIncremental_ = true;
+
+    QString language_{ "en" };
 
     bool nativeFileWatchEnabled_ = true;
 #ifdef Q_OS_WIN
@@ -537,7 +582,34 @@ class Configuration final : public Persistable<Configuration> {
 
     bool hideAnsiColorSequences_ = false;
 
+    int defaultEncodingMib_ = -1;
+
+    bool qfIgnoreCase_ = false;
+
+    bool useTextWrap_ = false;
+
     std::map<std::string, QStringList> shortcuts_;
+
+    // based on https://gist.github.com/QuantumCD/6245215
+    std::map<QString, QString> darkPalette_ = {
+        {"Window", "#353535"},
+        {"WindowText", "#FFFFFF"},
+        {"Base", "#282828"},
+        {"AlternateBase", "#353535"},
+        {"ToolTipBase", "#2a82da"},
+        {"ToolTipText", "#FFFFFF"},
+        {"Text", "#FFFFFF"},
+        {"Button", "#353535"},
+        {"ButtonText", "#FFFFFF"},
+        {"Link", "#2a82da"},
+        {"Highlight", "#2a82da"},
+        {"HighlightedText", "#212121"},
+        {"ActiveButton", "#303030"},
+        {"DisabledButtonText", "#757575"},
+        {"DisabledWindowText", "#808080"},
+        {"DisabledText", "#808080"},
+        {"DisabledLight", "#353535"},
+    };
 };
 
 #endif

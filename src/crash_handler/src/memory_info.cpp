@@ -85,10 +85,10 @@ uint64_t usedMemory()
 
 #else
 
-#include <stdint.h>
 #include <unistd.h>
 
 #include <array>
+#include <cstdio>
 
 uint64_t systemPhysicalMemory()
 {

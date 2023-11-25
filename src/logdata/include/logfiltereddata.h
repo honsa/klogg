@@ -39,6 +39,7 @@
 #ifndef LOGFILTEREDDATA_H
 #define LOGFILTEREDDATA_H
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <tuple>
@@ -133,15 +134,16 @@ class LogFilteredData : public AbstractLogData {
     Q_ENUM( VisibilityFlags );
     Q_DECLARE_FLAGS( Visibility, VisibilityFlags )
     void setVisibility( Visibility visibility );
+    Visibility visibility() const;
 
     void iterateOverLines( const std::function<void( LineNumber )>& callback ) const;
-  signals:
+  Q_SIGNALS:
     // Sent when the search has progressed, give the number of matches (so far)
     // and the percentage of completion
     void searchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine );
     void searchProgressedThrottled();
 
-  private slots:
+  private Q_SLOTS:
     void handleSearchProgressed( LinesCount nbMatches, int progress, LineNumber initialLine );
     void handleSearchProgressedThrottled();
 
@@ -149,10 +151,11 @@ class LogFilteredData : public AbstractLogData {
     // Implementation of virtual functions
     QString doGetLineString( LineNumber line ) const override;
     QString doGetExpandedLineString( LineNumber line ) const override;
-    std::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
-    std::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
-    std::vector<QString> doGetLines( LineNumber first, LinesCount number,
+    klogg::vector<QString> doGetLines( LineNumber first, LinesCount number ) const override;
+    klogg::vector<QString> doGetExpandedLines( LineNumber first, LinesCount number ) const override;
+    klogg::vector<QString> doGetLines( LineNumber first, LinesCount number,
                                      const std::function<QString( LineNumber )>& lineGetter ) const;
+    LineNumber doGetLineNumber( LineNumber index ) const override;
     LinesCount doGetNbLine() const override;
     LineLength doGetMaxLength() const override;
     LineLength doGetLineLength( LineNumber line ) const override;
@@ -199,8 +202,8 @@ class LogFilteredData : public AbstractLogData {
         LineLength maxLength;
     };
 
-    using SearchCacheKey = std::tuple<RegularExpressionPattern, uint32_t, uint32_t>;
-
+    using SearchCacheKey = std::tuple<RegularExpressionPattern, LineNumber::UnderlyingType,
+                                      LineNumber::UnderlyingType>;
     struct SearchCacheKeyHash {
         template <class T>
         void hash_combine( std::size_t& seed, const T& v ) const

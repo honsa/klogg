@@ -42,9 +42,12 @@
 #include <QToolButton>
 #include <QtGui>
 
+#include "encodings.h"
 #include "fontutils.h"
 #include "highlighteredit.h"
 #include "log.h"
+#include "mainwindow.h"
+#include "recentfiles.h"
 #include "savedsearches.h"
 #include "shortcuts.h"
 #include "styles.h"
@@ -64,6 +67,8 @@ OptionsDialog::OptionsDialog( QWidget* parent )
     setupFontList();
     setupRegexp();
     setupStyles();
+    setupEncodings();
+    setupLanguageList();
 
     // Validators
     QValidator* pollingIntervalValidator = new QIntValidator( PollIntervalMin, PollIntervalMax );
@@ -81,6 +86,14 @@ OptionsDialog::OptionsDialog( QWidget* parent )
 
     connect( mainSearchColorButton, &QPushButton::clicked, this, &OptionsDialog::changeMainColor );
     connect( quickFindColorButton, &QPushButton::clicked, this, &OptionsDialog::changeQfColor );
+
+    connect( restoreShortcutsDefaults, &QPushButton::clicked, this, [ this ]() {
+        auto ret = QMessageBox::question(
+            this, "Restore Default Shortcuts", "Do you want to restore default shortcuts?",
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel );
+        if ( ret == QMessageBox::Yes )
+            buildShortcutsTable( true );
+    } );
 
     updateDialogFromConfig();
 
@@ -138,6 +151,48 @@ void OptionsDialog::setupRegexp()
 void OptionsDialog::setupStyles()
 {
     styleComboBox->addItems( StyleManager::availableStyles() );
+}
+
+void OptionsDialog::setupEncodings()
+{
+    const auto availableEncodings = EncodingMenu::supportedEncodings();
+    encodingComboBox->addItem( "Auto", -1 );
+
+    std::map<QString, int> allMibs;
+
+    for ( const auto& group : availableEncodings ) {
+        for ( const auto& mib : group.second ) {
+            auto codec = QTextCodec::codecForMib( mib );
+            if ( codec ) {
+                allMibs.emplace( codec->name(), mib );
+            }
+        }
+    }
+
+    for ( const auto& codec : allMibs ) {
+        encodingComboBox->addItem( codec.first, codec.second );
+    }
+}
+
+void OptionsDialog::setupLanguageList()
+{
+    QResource resource( ":/i18n/Languages.xml" );
+    QByteArray bytes( reinterpret_cast<const char*>( resource.data() ), (int)resource.size() );
+    QXmlStreamReader xml( bytes );
+
+    while ( !xml.atEnd() ) {
+        QXmlStreamReader::TokenType token = xml.readNext();
+        if ( xml.hasError() ) {
+            LOG_ERROR << "load language error";
+            return;
+        }
+
+        if ( xml.name() == QString( "language" ) && token == QXmlStreamReader::StartElement ) {
+            QXmlStreamAttributes attributes = xml.attributes();
+            languageComboBox->addItem( attributes.value( "name" ).toString(),
+                                       attributes.value( "ietfCode" ).toString() );
+        }
+    }
 }
 
 void OptionsDialog::setupPolling()
@@ -245,8 +300,16 @@ void OptionsDialog::updateDialogFromConfig()
         fontSizeBox->setCurrentIndex( sizeIndex );
 
     fontSmoothCheckBox->setChecked( config.forceFontAntialiasing() );
+    wrapTextCheckBox->setChecked( config.useTextWrap() );
     enableQtHiDpiCheckBox->setChecked( config.enableQtHighDpi() );
     scaleRoundingComboBox->setCurrentIndex( config.scaleFactorRounding() - 1 );
+
+    // Language
+    auto langIdx = languageComboBox->findData( { config.language() } );
+    if ( langIdx == -1 ) {
+        langIdx = 0;
+    }
+    languageComboBox->setCurrentIndex( langIdx );
 
     const auto style = config.style();
     if ( !styleComboBox->findText( style, Qt::MatchExactly ) ) {
@@ -306,19 +369,26 @@ void OptionsDialog::updateDialogFromConfig()
     // downloads
     verifySslCheckBox->setChecked( config.verifySslPeers() );
 
-    buildShortcutsTable();
+    const auto encodingIndex = encodingComboBox->findData( config.defaultEncodingMib() );
+    encodingComboBox->setCurrentIndex( encodingIndex < 0 ? 0 : encodingIndex );
+
+    buildShortcutsTable( false );
 
     const auto& savedSearches = SavedSearches::get();
     searchHistorySpinBox->setValue( savedSearches.historySize() );
+
+    const auto& recentFiles = RecentFiles::get();
+    filesHistoryMaxItemsSpinBox->setMinimum( 1 );
+    filesHistoryMaxItemsSpinBox->setMaximum( MAX_RECENT_FILES );
+    filesHistoryMaxItemsSpinBox->setValue( recentFiles.filesHistoryMaxItems() );
 }
 
 //
-// Slots
+// Q_SLOTS:
 //
 
 void OptionsDialog::updateFontSize( const QString& fontFamily )
 {
-    QFontDatabase database;
     QString oldFontSize = fontSizeBox->currentText();
     const auto sizes = FontUtils::availableFontSizes( fontFamily );
 
@@ -350,13 +420,73 @@ void OptionsDialog::changeQfColor()
     }
 }
 
+void OptionsDialog::checkShortcutsOnDuplicate() const
+{
+    static constexpr int PRIMARY_COL = 1;
+    static constexpr int SECONDARY_COL = 2;
+
+    if ( !shortcutsTable->rowCount() ) {
+        return;
+    }
+
+    const auto DEFAULT_BACKGROUND = shortcutsTable->item( 0, PRIMARY_COL )->background();
+
+    for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
+        shortcutsTable->item( shortcutRow, PRIMARY_COL )->setBackground( DEFAULT_BACKGROUND );
+        shortcutsTable->item( shortcutRow, SECONDARY_COL )->setBackground( DEFAULT_BACKGROUND );
+    }
+
+    std::unordered_map<std::string, std::pair<int, int>> uniqueShortcuts;
+    bool hasDuplicateShortcuts = false;
+    for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
+
+        auto hasDuplicates = [ &uniqueShortcuts, shortcutRow, this ]( int ncol ) {
+            auto keySequence = static_cast<KeySequencePresenter*>(
+                                   shortcutsTable->cellWidget( shortcutRow, ncol ) )
+                                   ->keySequence();
+
+            if ( !keySequence.isEmpty() ) {
+                if ( auto it = uniqueShortcuts.find( keySequence.toStdString() );
+                     it != uniqueShortcuts.end() ) {
+
+                    shortcutsTable->item( it->second.first, it->second.second )
+                        ->setBackground( Qt::red );
+                    shortcutsTable->item( shortcutRow, ncol )->setBackground( Qt::red );
+
+                    return true;
+                }
+
+                uniqueShortcuts.try_emplace( keySequence.toStdString(),
+                                             std::make_pair( shortcutRow, ncol ) );
+            }
+
+            return false;
+        };
+
+        if ( hasDuplicates( PRIMARY_COL ) || hasDuplicates( SECONDARY_COL ) ) {
+            hasDuplicateShortcuts = true;
+        }
+    }
+
+    buttonBox->button( QDialogButtonBox::Ok )->setEnabled( !hasDuplicateShortcuts );
+    buttonBox->button( QDialogButtonBox::Apply )->setEnabled( !hasDuplicateShortcuts );
+}
+
+int OptionsDialog::updateTranslate()
+{
+    auto mw = dynamic_cast<MainWindow*>( parent() );
+    return mw->installLanguage( languageComboBox->currentData().toString() );
+}
+
 void OptionsDialog::updateConfigFromDialog()
 {
+    bool restartAppMessage = false;
     auto& config = Configuration::get();
 
     QFont font = QFont( fontFamilyBox->currentText(), ( fontSizeBox->currentText() ).toInt() );
     config.setMainFont( font );
     config.setForceFontAntialiasing( fontSmoothCheckBox->isChecked() );
+    config.setUseTextWrap( wrapTextCheckBox->isChecked() );
     config.setEnableQtHighDpi( enableQtHiDpiCheckBox->isChecked() );
     config.setScaleFactorRounding( scaleRoundingComboBox->currentIndex() + 1 );
 
@@ -405,13 +535,12 @@ void OptionsDialog::updateConfigFromDialog()
 
     config.setVerifySslPeers( verifySslCheckBox->isChecked() );
 
-    if ( config.style() != styleComboBox->currentText() ) {
-        QMessageBox::warning( this, "klogg",
-                              QString( "Klogg needs to be restarted to apply style changes. " ) );
-    }
+    restartAppMessage = config.style() != styleComboBox->currentText();
 
     config.setStyle( styleComboBox->currentText() );
     config.setHideAnsiColorSequences( hideAnsiColorsCheckBox->isChecked() );
+
+    config.setDefaultEncodingMib( encodingComboBox->currentData().toInt() );
 
     auto shortcuts = config.shortcuts();
     for ( auto shortcutRow = 0; shortcutRow < shortcutsTable->rowCount(); ++shortcutRow ) {
@@ -431,13 +560,30 @@ void OptionsDialog::updateConfigFromDialog()
     }
     config.setShortcuts( shortcuts );
 
+    // update translate when accept or apply clicked
+    restartAppMessage |= config.language() != languageComboBox->currentData().toString();
+    updateTranslate();
+    config.setLanguage( languageComboBox->currentData().toString() );
+    retranslateUi( this );
+
     config.save();
 
     auto& savedSearches = SavedSearches::get();
     savedSearches.setHistorySize( searchHistorySpinBox->value() );
     savedSearches.save();
 
-    emit optionsChanged();
+    auto& recentFiles = RecentFiles::get();
+    recentFiles.setFilesHistoryMaxItems( filesHistoryMaxItemsSpinBox->value() );
+    recentFiles.save();
+
+    if ( restartAppMessage ) {
+        QMessageBox::warning(
+            this, "klogg",
+            QApplication::translate( "OptionsDialog",
+                                     "Klogg needs to be restarted to apply some changes. " ) );
+    }
+
+    Q_EMIT optionsChanged();
 }
 
 void OptionsDialog::onButtonBoxClicked( QAbstractButton* button )
@@ -455,10 +601,12 @@ void OptionsDialog::onButtonBoxClicked( QAbstractButton* button )
 
 KeySequencePresenter::KeySequencePresenter( const QString& keySequence )
 {
-    keySequenceLabel_ = new QLabel( keySequence );
+    keySequenceLabel_
+        = new QLabel( QKeySequence( keySequence ).toString( QKeySequence::NativeText ) );
 
     auto editButton = new QPushButton();
     editButton->setText( "..." );
+    editButton->setFixedWidth( 50 );
 
     auto layout = new QHBoxLayout();
 
@@ -501,46 +649,57 @@ void KeySequencePresenter::showEditor()
 
     if ( keyEditDialog.exec() == QDialog::Accepted ) {
         keySequenceLabel_->setText( editor->keySequence().toString() );
+        Q_EMIT edited(); // NOTE: it's important to emit this signal only after changing
+                         // \keySequenceLabel_'s text
     }
 }
 
-void OptionsDialog::buildShortcutsTable()
+void OptionsDialog::buildShortcutsTable( bool useDefaultsOnly )
 {
+    shortcutsTable->setRowCount( 0 );
+
     const auto& config = Configuration::get();
-
-    auto shortcuts = config.shortcuts();
-
-    const auto& defaultShortcuts = ShortcutAction::defaultShortcuts();
-
-    for ( const auto& defaultMapping : defaultShortcuts ) {
-        if ( shortcuts.count( defaultMapping.first ) == 0 ) {
-            shortcuts.emplace( defaultMapping.first, defaultMapping.second );
+    auto shortcuts = ShortcutAction::defaultShortcuts();
+    if ( !useDefaultsOnly ) {
+        for ( const auto& [ action, keys ] : config.shortcuts() ) {
+            shortcuts[ action ] = keys;
         }
     }
 
-    for ( const auto& mapping : shortcuts ) {
+    for ( const auto& [ action, keys ] : shortcuts ) {
         auto currentRow = shortcutsTable->rowCount();
         shortcutsTable->insertRow( currentRow );
 
-        auto keyItem = new QTableWidgetItem( ShortcutAction::actionName( mapping.first ) );
+        auto keyItem = new QTableWidgetItem( ShortcutAction::actionName( action ) );
         keyItem->setFlags( Qt::ItemIsEnabled | Qt::ItemIsSelectable );
-        keyItem->setData( Qt::UserRole, QString::fromStdString( mapping.first ) );
+        keyItem->setData( Qt::UserRole, QString::fromStdString( action ) );
         shortcutsTable->setItem( currentRow, 0, keyItem );
 
-        auto primaryKeySequence
-            = new KeySequencePresenter( mapping.second.size() > 0 ? mapping.second[ 0 ] : "" );
+        auto primaryKeySequence = new KeySequencePresenter( keys.size() > 0 ? keys[ 0 ] : "" );
+        shortcutsTable->setItem( currentRow, 1, new QTableWidgetItem );
         shortcutsTable->setCellWidget( currentRow, 1, primaryKeySequence );
+        connect( primaryKeySequence, &KeySequencePresenter::edited, this,
+                 &OptionsDialog::checkShortcutsOnDuplicate );
 
-        auto secondaryKeySequence
-            = new KeySequencePresenter( mapping.second.size() > 1 ? mapping.second[ 1 ] : "" );
+        auto secondaryKeySequence = new KeySequencePresenter( keys.size() > 1 ? keys[ 1 ] : "" );
+        shortcutsTable->setItem( currentRow, 2, new QTableWidgetItem );
         shortcutsTable->setCellWidget( currentRow, 2, secondaryKeySequence );
+        connect( secondaryKeySequence, &KeySequencePresenter::edited, this,
+                 &OptionsDialog::checkShortcutsOnDuplicate );
     }
 
     shortcutsTable->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    shortcutsTable->verticalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    shortcutsTable->setHorizontalHeaderItem( 0, new QTableWidgetItem( "Action" ) );
-    shortcutsTable->setHorizontalHeaderItem( 1, new QTableWidgetItem( "Primary shortcut" ) );
-    shortcutsTable->setHorizontalHeaderItem( 2, new QTableWidgetItem( "Secondary shortcut" ) );
+    shortcutsTable->horizontalHeader()->setSectionResizeMode( 0, QHeaderView::Interactive );
+    shortcutsTable->horizontalHeader()->setMinimumSectionSize( 150 );
+    shortcutsTable->resizeColumnToContents( 0 );
+    shortcutsTable->setHorizontalHeaderItem( 0, new QTableWidgetItem( tr( "Action" ) ) );
+    shortcutsTable->setHorizontalHeaderItem( 1, new QTableWidgetItem( tr( "Primary shortcut" ) ) );
+    shortcutsTable->setHorizontalHeaderItem( 2,
+                                             new QTableWidgetItem( tr( "Secondary shortcut" ) ) );
+
+    // in case if user set duplicate keys and after restores defaults
+    // it is need to enable back standard buttons
+    checkShortcutsOnDuplicate();
 
     shortcutsTable->sortItems( 0 );
 }

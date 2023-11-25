@@ -33,6 +33,13 @@ object_script.glogg.Release
 
 
 build_root/
+build_root_clang/
+build_root_gcc/
+build_root_qt5/
+build_root_qt6/
+test_data/
+
+compile_commands.json
 
 # Qt-specific
 /.moc
@@ -48,6 +55,7 @@ website/public
 .idea/
 cmake-build-debug/
 cmake-build-release/
+cmake-build-relwithdebinfo/
 
 #website
 website/hugo

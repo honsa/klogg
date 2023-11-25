@@ -41,7 +41,6 @@
 
 #include <qcheckbox.h>
 #include <qcolor.h>
-#include <qlabel.h>
 #include <qlineedit.h>
 #include <qnamespace.h>
 #include <qpushbutton.h>
@@ -185,16 +184,20 @@ HighlightersDialog::HighlightersDialog( QWidget* parent )
 }
 
 //
-// Slots
+// Q_SLOTS:
 //
 
 void HighlightersDialog::exportHighlighters()
 {
-    QString file = QFileDialog::getSaveFileName( this, "Export highlighters configuration", "",
-                                                 "Highlighters (*.conf)" );
+    QString file = QFileDialog::getSaveFileName( this, tr( "Export highlighters configuration" ),
+                                                 "", "Highlighters (*.conf)" );
 
     if ( file.isEmpty() ) {
         return;
+    }
+
+    if ( !file.endsWith( ".conf" ) ) {
+        file += ".conf";
     }
 
     QSettings settings{ file, QSettings::IniFormat };
@@ -203,8 +206,8 @@ void HighlightersDialog::exportHighlighters()
 
 void HighlightersDialog::importHighlighters()
 {
-    QStringList files = QFileDialog::getOpenFileNames( this, "Select one or more files to open", "",
-                                                       "Highlighters (*.conf)" );
+    QStringList files = QFileDialog::getOpenFileNames(
+        this, tr( "Select one or more files to open" ), "", tr( "Highlighters (*.conf)" ) );
 
     for ( const auto& file : qAsConst( files ) ) {
         LOG_DEBUG << "Loading highlighters from " << file;
@@ -321,18 +324,13 @@ void HighlightersDialog::resolveDialog( QAbstractButton* button )
         return;
     }
     persistentHighlighterSet.save();
-    emit optionsChanged();
+    Q_EMIT optionsChanged();
 }
 
 void HighlightersDialog::setCurrentRow( int row )
 {
     // ugly hack for mac
     dispatchToMainThread( [ this, row ]() { highlighterListWidget->setCurrentRow( row ); } );
-}
-
-void HighlightersDialog::updateGroupTitle( const HighlighterSet& set )
-{
-    groupBox->setTitle( QString( "Set %1 properties" ).arg( set.name() ) );
 }
 
 void HighlightersDialog::updatePropertyFields()
@@ -353,8 +351,6 @@ void HighlightersDialog::updatePropertyFields()
         removeHighlighterButton->setEnabled( true );
         upHighlighterButton->setEnabled( selectedRow_ > 0 );
         downHighlighterButton->setEnabled( selectedRow_ < ( highlighterListWidget->count() - 1 ) );
-
-        updateGroupTitle( currentSet );
     }
     else {
         highlighterSetEdit_->reset();
@@ -375,7 +371,6 @@ void HighlightersDialog::updateHighlighterProperties()
         currentSet = highlighterSetEdit_->highlighters();
         // Update the entry in the highlighterList widget
         highlighterListWidget->currentItem()->setText( currentSet.name() );
-        updateGroupTitle( currentSet );
     }
 }
 

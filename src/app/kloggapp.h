@@ -24,9 +24,11 @@
 #include <cstddef>
 #include <iterator>
 #include <numeric>
+#include <qapplication.h>
 #include <stack>
 
 #include <QApplication>
+#include <vector>
 
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
 #include <QCborValue>
@@ -49,22 +51,19 @@
 #include "session.h"
 #include "uuid.h"
 
-#include <singleapp/singleapplication.h>
+#include <kdsingleapplication.h>
 
 #include "mainwindow.h"
 #include "messagereceiver.h"
 #include "versionchecker.h"
 
-class KloggApp : public SingleApplication {
+class KloggApp : public QApplication {
 
     Q_OBJECT
 
   public:
     KloggApp( int& argc, char* argv[] )
-        : SingleApplication( argc, argv, true,
-                             SingleApplication::SecondaryNotification
-                                 | SingleApplication::ExcludeAppPath
-                                 | SingleApplication::ExcludeAppVersion )
+        : QApplication( argc, argv)
     {
         QFontDatabase::addApplicationFont( ":/fonts/DejaVuSansMono.ttf" );
 
@@ -74,6 +73,7 @@ class KloggApp : public SingleApplication {
         qRegisterMetaType<LinesCount>( "LinesCount" );
         qRegisterMetaType<LineNumber>( "LineNumber" );
         qRegisterMetaType<std::vector<LineNumber>>( "std::vector<LineNumber>" );
+        qRegisterMetaType<klogg::vector<LineNumber>>( "klogg::vector<LineNumber>" );
         qRegisterMetaType<LineLength>( "LineLength" );
         qRegisterMetaType<Portion>( "Portion" );
         qRegisterMetaType<Selection>( "Selection" );
@@ -85,8 +85,8 @@ class KloggApp : public SingleApplication {
         qRegisterMetaType<QFNotificationInterrupted>( "QFNotificationInterrupted" );
         qRegisterMetaType<QuickFindMatcher>( "QuickFindMatcher" );
 
-        if ( isPrimary() ) {
-            QObject::connect( this, &SingleApplication::receivedMessage, &messageReceiver_,
+        if ( singleApplication_.isPrimaryInstance() ) {
+            QObject::connect( &singleApplication_, &KDSingleApplication::messageReceived, &messageReceiver_,
                               &MessageReceiver::receiveMessage, Qt::QueuedConnection );
 
             QObject::connect( &messageReceiver_, &MessageReceiver::loadFile, this,
@@ -101,9 +101,18 @@ class KloggApp : public SingleApplication {
         }
     }
 
+    bool isSecondary() const {
+        return !singleApplication_.isPrimaryInstance();
+    }
+
+    qint64 primaryPid() const {
+        return singleApplication_.primaryPid();
+    }
+
     void sendFilesToPrimaryInstance( std::vector<QString> filenames )
     {
 #ifdef Q_OS_WIN
+        // TODO: fix pid passing
         ::AllowSetForegroundWindow( static_cast<DWORD>( primaryPid() ) );
 #endif
 
@@ -117,13 +126,13 @@ class KloggApp : public SingleApplication {
 
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 12, 0 )
             auto cbor = QCborValue::fromVariant( data );
-            this->sendMessage( cbor.toCbor(), 5000 );
+            singleApplication_.sendMessageWithTimeout( cbor.toCbor(), 5000 );
 #else
             auto json = QJsonDocument::fromVariant( data );
-            this->sendMessage( json.toBinaryData(), 5000 );
+            singleApplication_.sendMessageWithTimeout( json.toBinaryData(), 5000 );
 #endif
 
-            QTimer::singleShot( 100, this, &SingleApplication::quit );
+            QTimer::singleShot( 100, this, &QApplication::quit );
         } );
     }
 
@@ -183,12 +192,12 @@ class KloggApp : public SingleApplication {
         const auto previousSessions = session_->windowSessions();
 
         QByteArray geometry;
-        if (!previousSessions.empty()) {
+        if ( !previousSessions.empty() ) {
             previousSessions.back().restoreGeometry( &geometry );
         }
-        
+
         auto window = newWindow( { session_, generateIdFromUuid(), nextWindowIndex() } );
-        window->restoreGeometry(geometry);
+        window->restoreGeometry( geometry );
 
         return window;
     }
@@ -219,7 +228,7 @@ class KloggApp : public SingleApplication {
             QFileOpenEvent* openEvent = static_cast<QFileOpenEvent*>( event );
             LOG_INFO << "File open request " << openEvent->file();
 
-            if ( isPrimary() ) {
+            if ( !isSecondary() ) {
                 loadFileNonInteractive( openEvent->file() );
             }
             else {
@@ -227,7 +236,7 @@ class KloggApp : public SingleApplication {
             }
         }
 
-        return SingleApplication::event( event );
+        return QApplication::event( event );
     }
 #endif
 
@@ -274,8 +283,9 @@ class KloggApp : public SingleApplication {
         session_->setExitRequested( true );
         auto mainWindows = mainWindows_;
         mainWindows.reverse();
-        for ( auto window : mainWindows ) {
-            window.second->close();
+        for ( const auto& [ session, window ] : mainWindows ) {
+            Q_UNUSED( session );
+            window->close();
         }
 
         QTimer::singleShot( 100, this, &QCoreApplication::quit );
@@ -309,14 +319,16 @@ class KloggApp : public SingleApplication {
             return 0;
         }
         else {
-            return std::transform_reduce(
-                mainWindows_.begin(), mainWindows_.end(), size_t{ 1 },
-                []( size_t acc, size_t nextIndex ) { return std::max( acc, nextIndex ); },
-                []( const auto& window ) { return window.first.windowIndex(); } );
+            const auto windowWithMaxIndex = std::max_element(
+                mainWindows_.begin(), mainWindows_.end(), []( const auto& lhs, const auto& rhs ) {
+                    return lhs.first.windowIndex() < rhs.first.windowIndex();
+                } );
+            return windowWithMaxIndex->first.windowIndex() + 1;
         }
     }
 
   private:
+    KDSingleApplication singleApplication_;
     std::unique_ptr<CrashHandler> crashHandler_;
 
     MessageReceiver messageReceiver_;

@@ -44,6 +44,7 @@
 #include <cstddef>
 #include <functional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <QAbstractScrollArea>
@@ -68,80 +69,7 @@
 class QMenu;
 class QAction;
 class QShortcut;
-
-class LineChunk {
-  public:
-    LineChunk( int firstCol, int endCol, QColor foreColor, QColor backColor )
-        : start_{ firstCol }
-        , end_{ endCol }
-        , foreColor_{ foreColor }
-        , backColor_{ backColor }
-    {
-    }
-
-    int start() const
-    {
-        return start_;
-    }
-    int end() const
-    {
-        return end_;
-    }
-
-    int length() const
-    {
-        return end_ - start_ + 1;
-    }
-
-    QColor foreColor() const
-    {
-        return foreColor_;
-    }
-
-    QColor backColor() const
-    {
-        return backColor_;
-    }
-
-  private:
-    int start_ = {};
-    int end_ = {};
-
-    QColor foreColor_;
-    QColor backColor_;
-};
-
-// Utility class for syntax colouring.
-// It stores the chunks of line to draw
-// each chunk having a different colour
-class LineDrawer {
-  public:
-    explicit LineDrawer( const QColor& backColor )
-        : backColor_( backColor )
-    {
-    }
-
-    // Add a chunk of line using the given colours.
-    // Both first_col and last_col are included
-    // An empty chunk will be ignored.
-    // the first column will be set to 0 if negative
-    // The column are relative to the screen
-    void addChunk( int firstCol, int lastCol, const QColor& fore, const QColor& back );
-    void addChunk( const LineChunk& chunk );
-
-    // Draw the current line of text using the given painter,
-    // in the passed block (in pixels)
-    // The line must be cut to fit on the screen.
-    // leftExtraBackgroundPx is the an extra margin to start drawing
-    // the coloured // background, going all the way to the element
-    // left of the line looks better.
-    void draw( QPainter* painter, int xPos, int yPos, int lineWidth, const QString& line,
-               int leftExtraBackgroundPx );
-
-  private:
-    std::vector<LineChunk> chunks_;
-    QColor backColor_;
-};
+class HighlightersMenu;
 
 // Utility class representing a buffer for number entered on the keyboard
 // The buffer keep at most 7 digits, and reset itself after a timeout.
@@ -203,7 +131,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Return the line number of the top line of the view
     LineNumber getTopLine() const;
     // Return the text of the current selection.
-    QString getSelection() const;
+    QString getSelectedText() const;
     // True for partial selection
     bool isPartialSelection() const;
     // Instructs the widget to select the whole text.
@@ -212,6 +140,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     bool isFollowEnabled() const
     {
         return followMode_;
+    }
+
+    bool isTextWrapEnabled() const
+    {
+        return useTextWrap_;
     }
 
     void allowFollowMode( bool allow );
@@ -261,22 +194,21 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     virtual void doRegisterShortcuts();
     void registerShortcut( const std::string& action, std::function<void()> func );
 
-  signals:
-    // Sent when a new line has been selected by the user.
-    void newSelection( LineNumber line );
+  Q_SIGNALS:
     // Sent up to the MainWindow to enable/disable the follow mode
     void followModeChanged( bool enabled );
     // Sent when the view wants the QuickFind widget pattern to change.
     void changeQuickFind( const QString& newPattern, QuickFindMux::QFDirection newDirection );
-    // Sent up when the current line number is updated
-    void updateLineNumber( LineNumber line );
+    // Sent when a new line has been selected by the user
+    void newSelection( LineNumber startLine, LinesCount nLines, LineColumn startCol,
+                       LineLength nSymbols );
     // Sent up when quickFind wants to show a message to the user.
     void notifyQuickFind( const QFNotification& message );
     // Sent up when quickFind wants to clear the notification.
     void clearQuickFindNotification();
     // Sent when the view ask for a line to be marked
     // (click in the left margin).
-    void markLines( const std::vector<LineNumber>& lines );
+    void markLines( const klogg::vector<LineNumber>& lines );
     // Sent up when the user wants to add the selection to the search
     void addToSearch( const QString& selection );
     // Sent up when the user wants to replace the search with the selection
@@ -299,17 +231,22 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void clearSearchLimits();
 
     void saveDefaultSplitterSizes();
+    void sendSelectionToScratchpad();
+    void replaceScratchpadWithSelection();
     void changeFontSize( bool increase );
 
     void addColorLabel( size_t label );
     void addNextColorLabel();
     void clearColorLabels();
+    void highlightersChange();
 
-  public slots:
+  public Q_SLOTS:
     // Makes the widget select and display the passed line.
     // Scrolling as necessary
     void trySelectLine( LineNumber newLine );
     void selectAndDisplayLine( LineNumber line );
+    void selectPortionAndDisplayLine( LineNumber line, LinesCount nLines, LineColumn startCol,
+                                      LineLength nSymbols );
 
     // Use the current QFP to go and select the next match.
     void searchForward() override;
@@ -328,11 +265,14 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Signals the follow mode has been enabled.
     void followSet( bool checked );
 
+    // Signals the text wrap mode has been enabled.
+    void textWrapSet( bool checked );
+
     // Signal the on/off status of the overview has been changed.
     void refreshOverview();
 
     // Make the view jump to the specified line, regardless of it
-    // being on the screen or not. (does NOT emit followDisabled() )
+    // being on the screen or not. (does NOT Q_EMIT followDisabled() )
     void jumpToLine( LineNumber line );
 
     // Configure the setting of whether to show line number margin
@@ -344,7 +284,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     void setSearchLimits( LineNumber startLine, LineNumber endLine );
 
-  private slots:
+  private Q_SLOTS:
     void handlePatternUpdated();
     void addToSearch();
     void replaceSearch();
@@ -352,14 +292,15 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void findNextSelected();
     void findPreviousSelected();
     void copy();
+    void copyWithLineNumbers();
     void markSelected();
     void saveToFile();
+    void saveSelectedToFile();
     void setSearchStart();
     void setSearchEnd();
     void setSelectionStart();
     void setSelectionEnd();
-    void setQuickFindResult( bool hasMatch, Portion selection );
-    void setHighlighterSet( QAction* action );
+    void setQuickFindResult( bool hasMatch, const Portion& selection );
     void setColorLabel( QAction* action );
 
   private:
@@ -397,16 +338,11 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // reasons).
     OverviewWidget* overviewWidget_ = nullptr;
 
-    struct FilePos {
-        LineNumber line;
-        int column;
-    };
-
     bool selectionStarted_ = false;
     // Start of the selection (characters)
-    FilePos selectionStartPos_;
+    FilePosition selectionStartPos_;
     // Current end of the selection (characters)
-    FilePos selectionCurrentEndPos_;
+    FilePosition selectionCurrentEndPos_;
     QBasicTimer autoScrollTimer_;
 
     // Hovering state
@@ -428,7 +364,10 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // rather than the top of the top one.
     LineNumber firstLine_;
     bool lastLineAligned_ = false;
-    int firstCol_ = 0;
+    bool useTextWrap_ = false;
+    LineColumn firstCol_ = 0_lcol;
+
+    klogg::vector<std::pair<LineNumber, size_t>> wrappedLinesNumbers_;
 
     LineNumber searchStart_;
     LineNumber searchEnd_;
@@ -442,8 +381,12 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     // Popup menu
     QMenu* popupMenu_;
     QAction* copyAction_;
+    QAction* copyWithLineNumbersAction_;
     QAction* markAction_;
+    QAction* sendToScratchpadAction_;
+    QAction* replaceInScratchpadAction_;
     QAction* saveToFileAction_;
+    QAction* saveSelectedToFileAction_;
     QAction* findNextAction_;
     QAction* findPreviousAction_;
     QAction* addToSearchAction_;
@@ -455,7 +398,7 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     QAction* setSelectionStartAction_;
     QAction* setSelectionEndAction_;
     QAction* saveDefaultSplitterSizesAction_;
-    QMenu* highlightersMenu_;
+    HighlightersMenu* highlightersMenu_;
     QMenu* colorLabelsMenu_;
 
     std::map<QString, QShortcut*> shortcuts_;
@@ -479,22 +422,23 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
         bool invalid_;
         LineNumber first_line_;
         LineNumber last_line_;
-        int first_column_;
+        LineColumn first_column_;
     };
     struct PullToFollowCache {
         QPixmap pixmap_;
-        int nb_columns_;
+        LineLength nb_columns_;
     };
-    TextAreaCache textAreaCache_ = { {}, true, 0_lnum, 0_lnum, 0 };
-    PullToFollowCache pullToFollowCache_ = { {}, 0 };
+    TextAreaCache textAreaCache_ = { {}, true, 0_lnum, 0_lnum, 0_lcol };
+    PullToFollowCache pullToFollowCache_ = { {}, 0_length };
     QFontMetrics pixmapFontMetrics_;
 
     LinesCount getNbVisibleLines() const;
-    int getNbVisibleCols() const;
+    LinesCount getNbBottomWrappedVisibleLines() const;
+    LineLength getNbVisibleCols() const;
 
-    FilePos convertCoordToFilePos( const QPoint& pos ) const;
+    FilePosition convertCoordToFilePos( const QPoint& pos ) const;
     OptionalLineNumber convertCoordToLine( int yPos ) const;
-    int convertCoordToColumn( int xPos ) const;
+    LineColumn convertCoordToColumn( int xPos ) const;
 
     void displayLine( LineNumber line );
     void moveSelection( LinesCount delta, bool isDeltaNegative );
@@ -505,13 +449,18 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
     void jumpToRightOfScreen();
     void jumpToTop();
     void jumpToBottom();
-    void selectWordAtPosition( const FilePos& pos );
+    void selectWordAtPosition( const FilePosition& pos );
 
     void updateSearchLimits();
 
     void createMenu();
 
     void considerMouseHovering( int xPos, int yPos );
+
+    LineLength maxLineLength( const klogg::vector<LineNumber>& lines ) const;
+
+    // Save specified lines in range [begin, end) to a file
+    void saveLinesToFile( LineNumber begin, LineNumber end );
 
     // Search functions (for n/N)
     using QuickFindSearchFn = void ( QuickFind::* )( Selection, QuickFindMatcher );
@@ -530,6 +479,8 @@ class AbstractLogView : public QAbstractScrollArea, public SearchableWidgetInter
 
     // Utils functions
     void updateGlobalSelection();
+
+    void selectAndDisplayRange( FilePosition pos );
 };
 
 #endif

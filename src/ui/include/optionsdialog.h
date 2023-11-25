@@ -39,12 +39,12 @@
 #ifndef OPTIONSDIALOG_H
 #define OPTIONSDIALOG_H
 
-#include <QDialog>
-#include <QPushButton>
-#include <QLabel>
-#include <QKeySequenceEdit>
-#include <QHBoxLayout>
 #include <QColor>
+#include <QDialog>
+#include <QHBoxLayout>
+#include <QKeySequenceEdit>
+#include <QLabel>
+#include <QPushButton>
 
 #include "configuration.h"
 
@@ -55,9 +55,12 @@ class KeySequencePresenter : public QWidget {
   public:
     explicit KeySequencePresenter( const QString& keySequence );
 
-  QString keySequence() const;
+    QString keySequence() const;
 
-  private slots:
+  Q_SIGNALS:
+    void edited();
+
+  private Q_SLOTS:
     void showEditor();
 
   private:
@@ -71,11 +74,11 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
   public:
     explicit OptionsDialog( QWidget* parent = nullptr );
 
-  signals:
+  Q_SIGNALS:
     // Is emitted when new settings must be used
     void optionsChanged();
 
-  private slots:
+  private Q_SLOTS:
     // Clears and updates the font size box with the sizes allowed
     // by the passed font family.
     void updateFontSize( const QString& fontFamily );
@@ -88,6 +91,8 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void changeMainColor();
     void changeQfColor();
 
+    void checkShortcutsOnDuplicate() const;
+
   private:
     void setupTabs();
     void setupFontList();
@@ -97,8 +102,12 @@ class OptionsDialog : public QDialog, public Ui::OptionsDialog {
     void setupLogging();
     void setupArchives();
     void setupStyles();
+    void setupEncodings();
+    void setupLanguageList();
 
-    void buildShortcutsTable();
+    int updateTranslate();
+
+    void buildShortcutsTable(bool useDefaultsOnly);
 
     int getRegexpTypeIndex( SearchRegexpType syntax ) const;
     SearchRegexpType getRegexpTypeFromIndex( int index ) const;

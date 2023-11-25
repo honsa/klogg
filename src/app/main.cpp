@@ -36,26 +36,26 @@
  * along with klogg.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <QMessageBox>
+#include "log.h"
 #include <QtGlobal>
 #include <qapplication.h>
+#include <qthreadpool.h>
 
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#if defined( KLOGG_USE_MIMALLOC )
-#include <mimalloc-new-delete.h>
-#endif
 #endif // _WIN32
 
-#if defined( KLOGG_USE_TBBMALLOC )
-#include <tbb/tbbmalloc_proxy.h>
-#elif defined( KLOGG_USE_MIMALLOC )
 #include <mimalloc.h>
+#include <roaring.hh>
+
+#ifdef KLOGG_HAS_HS
+#include <hs.h>
 #endif
 
+#include "tbb/global_control.h"
+
 #include "configuration.h"
-#include "cpu_info.h"
 #include "logger.h"
 #include "mainwindow.h"
 #include "styles.h"
@@ -83,11 +83,15 @@ void setApplicationAttributes( bool enableQtHdpi, int scaleFactorRounding )
     // - https://bugreports.qt.io/browse/QTBUG-46015
     qputenv( "QT_BEARER_POLL_TIMEOUT", QByteArray::number( std::numeric_limits<int>::max() ) );
 
-    if ( enableQtHdpi ) {
-        // This attribute must be set before QGuiApplication is constructed:
-        QCoreApplication::setAttribute( Qt::AA_EnableHighDpiScaling );
-        // We support high-dpi (aka Retina) displays
-        QCoreApplication::setAttribute( Qt::AA_UseHighDpiPixmaps );
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
+#ifdef Q_OS_WIN
+    QCoreApplication::setAttribute( Qt::AA_DisableWindowContextHelpButton );
+#endif
+
+    if ( !enableQtHdpi ) {
+        QCoreApplication::setAttribute( Qt::AA_DisableHighDpiScaling );
+    }
+    else {
 
 #if QT_VERSION >= QT_VERSION_CHECK( 5, 14, 0 )
         QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
@@ -95,16 +99,18 @@ void setApplicationAttributes( bool enableQtHdpi, int scaleFactorRounding )
 #else
         Q_UNUSED( scaleFactorRounding );
 #endif
+
+        // This attribute must be set before QGuiApplication is constructed:
+        QCoreApplication::setAttribute( Qt::AA_EnableHighDpiScaling );
+        // We support high-dpi (aka Retina) displays
+        QCoreApplication::setAttribute( Qt::AA_UseHighDpiPixmaps );
     }
-    else {
-        QCoreApplication::setAttribute( Qt::AA_DisableHighDpiScaling );
-    }
+#else
+    Q_UNUSED( enableQtHdpi );
+    Q_UNUSED( scaleFactorRounding );
+#endif
 
     QCoreApplication::setAttribute( Qt::AA_DontShowIconsInMenus );
-
-#ifdef Q_OS_WIN
-    QCoreApplication::setAttribute( Qt::AA_DisableWindowContextHelpButton );
-#endif
 }
 
 int main( int argc, char* argv[] )
@@ -113,21 +119,13 @@ int main( int argc, char* argv[] )
     mi_process_init();
 #endif
 
-    auto requiredInstructuins = CpuInstructions::SSE2;
-    requiredInstructuins |= CpuInstructions::SSSE3;
-
-    if ( !hasRequiredInstructions( supportedCpuInstructions(), requiredInstructuins ) ) {
-        QApplication app( argc, argv );
-        QMessageBox::critical( nullptr, "Klogg",
-                               "Current CPU is not supported. SSE2 and SSSE3 are required.",
-                               QMessageBox::Close );
-        exit( EXIT_FAILURE );
-    }
-
     const auto& config = Configuration::getSynced();
     setApplicationAttributes( config.enableQtHighDpi(), config.scaleFactorRounding() );
 
     KloggApp app( argc, argv );
+
+
+    MainWindow::installLanguage( config.language() );
     CliParameters parameters( app );
 
     const auto logLevel
@@ -137,7 +135,34 @@ int main( int argc, char* argv[] )
 
     app.initCrashHandler();
 
-    LOG_INFO << "Klogg instance " << app.instanceId();
+    auto maxConcurrency
+        = tbb::global_control::active_value( tbb::global_control::max_allowed_parallelism );
+
+    LOG_INFO << "Klogg instance"
+             << ", mimalloc v" << mi_version()
+             << ", default concurrency " << maxConcurrency;
+
+
+    roaring_memory_t roaring_memory_allocators;
+    roaring_memory_allocators.malloc = mi_malloc;
+    roaring_memory_allocators.realloc = mi_realloc;
+    roaring_memory_allocators.calloc = mi_calloc;
+    roaring_memory_allocators.free = mi_free;
+    roaring_memory_allocators.aligned_malloc = mi_aligned_alloc;
+    roaring_memory_allocators.aligned_free = mi_free;
+    roaring_init_memory_hook(roaring_memory_allocators);
+
+#ifdef KLOGG_HAS_HS
+    hs_set_allocator(mi_malloc, mi_free);
+#endif
+
+    if ( maxConcurrency < 2 ) {
+        maxConcurrency = 2;
+        LOG_INFO << "Overriding default concurrency to " << maxConcurrency;
+        tbb::global_control concurrencyControl( tbb::global_control::max_allowed_parallelism,
+                                                maxConcurrency );
+        QThreadPool::globalInstance()->setMaxThreadCount( static_cast<int>( maxConcurrency ) );
+    }
 
     if ( !parameters.multi_instance && app.isSecondary() ) {
         LOG_INFO << "Found another klogg, pid " << app.primaryPid();

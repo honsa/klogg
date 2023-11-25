@@ -77,12 +77,12 @@ BlockPoolBase& BlockPoolBase::operator=( BlockPoolBase&& other ) noexcept
     return *this;
 }
 
-uint8_t* BlockPoolBase::operator[](size_t index)
+uint8_t* BlockPoolBase::at(size_t index)
 {
     return pool_.data() + blockIndex_.at( index );
 }
 
-const uint8_t* BlockPoolBase::operator[](size_t index) const
+const uint8_t* BlockPoolBase::at(size_t index) const
 {
     return pool_.data() + blockIndex_.at( index );
 }
@@ -99,7 +99,7 @@ size_t BlockPoolBase::getPaddedElementSize() const
 
 uint32_t BlockPoolBase::currentBlock() const
 {
-    return static_cast<uint32_t>( blockIndex_.size() - 1 );
+    return blockIndex_.empty() ? 0 : type_safe::narrow_cast<uint32_t>( blockIndex_.size() - 1 );
 }
 
 uint8_t* BlockPoolBase::getBlock( size_t elementsCount )

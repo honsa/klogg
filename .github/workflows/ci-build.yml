@@ -26,15 +26,15 @@ on:
 jobs:
   SaveVersion:
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - uses: ./.github/actions/klogg-version
 
       - name: Save version 
         run: echo $KLOGG_VERSION > klogg_version.txt
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v3
         with:
           name: klogg_version
           path: 'klogg_version.txt'
@@ -46,68 +46,102 @@ jobs:
       fail-fast: false
       matrix:
         config:
+          #- os: oraclelinux
+          #  os_version: 7
+          #  arch: x64
+          #  check_command: yum install -y --setopt tsflags=test /usr/local/klogg*.rpm
+          #  cpack_gen: RPM
+          #  artifacts_id: oracle7
+          #  package_suffix: rpm
+          #  check_container: oraclelinux:7
+          #  container_root: docker/oracle7
+          #  container: variar/klogg_oracle7
+          #  cmake_opts: -DKLOGG_USE_SENTRY=OFF -DKLOGG_USE_LTO=OFF -DKLOGG_USE_HYPERSCAN=OFF
 
-          - os: centos
+          - os: oraclelinux
             os_version: 8
             arch: x64
             check_command: yum install -y --setopt tsflags=test /usr/local/klogg*.rpm
             cpack_gen: RPM
-            artifacts_id: rpm
-            check_container: centos:8
-            container_root: docker/centos8
-            container: variar/klogg_centos8
-            cmake_opts: -DKLOGG_USE_LTO=OFF
+            artifacts_id: oracle
+            package_suffix: rpm
+            check_container: oraclelinux:8
+            container_root: docker/oracle8
+            container: variar/klogg_oracle8
+            cmake_opts: -DCMAKE_BUILD_WITH_INSTALL_RPATH=on
 
-          - os: ubuntu
+          - os: ubuntu_bionic
             os_version: 18.04
             arch: x64
             check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
             cpack_gen: DEB
-            artifacts_id: deb
+            artifacts_id: bionic
+            package_suffix: deb
             check_container: ubuntu:18.04
             container_root: docker/ubuntu18.04
             container: variar/klogg_ubuntu18.04
+            cmake_opts: -DKLOGG_USE_LTO=OFF
+
+          - os: ubuntu_focal
+            os_version: 20.04
+            arch: x64
+            check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
+            cpack_gen: DEB
+            artifacts_id: focal
+            package_suffix: deb
+            check_container: ubuntu:20.04
+            container_root: docker/ubuntu20.04
+            container: variar/klogg_ubuntu20.04
+            cmake_opts:
+          
+          - os: ubuntu_jammy
+            os_version: 22.04
+            arch: x64
+            check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
+            cpack_gen: DEB
+            artifacts_id: jammy
+            package_suffix: deb
+            check_container: ubuntu:22.04
+            container_root: docker/ubuntu22.04
+            container: variar/klogg_ubuntu22.04
             cmake_opts:
 
+          - os: ubuntu_appimage
+            os_version: 18.04
+            arch: x64
+            #check_command: apt-get update && apt install --dry-run /usr/local/klogg*.deb
+            #cpack_gen: DEB
+            artifacts_id: appimage
+            package_suffix: AppImage
+            #check_container: ubuntu:18.04
+            container_root: docker/ubuntu18.04_qt5.15
+            container: variar/klogg_ubuntu18.04_qt5.15
+            cmake_opts: -DKLOGG_USE_LTO=OFF -DCMAKE_PREFIX_PATH=/opt/qt515/
 
-    runs-on: ubuntu-18.04
+
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
 
-      - uses: satackey/action-docker-layer-caching@v0.0.11
-        # Ignore the failure of a step and avoid terminating the job.
-        continue-on-error: true
+      #- uses: satackey/action-docker-layer-caching@v0.0.11
+      #  # Ignore the failure of a step and avoid terminating the job.
+      #  continue-on-error: true
       
       - name: Build container 
         run: |
           cd ${{ matrix.config.container_root }}
           docker build -t ${{ matrix.config.container }} .
 
-      - uses: ./.github/actions/prepare-boost
       - uses: ./.github/actions/klogg-version
       - uses: ./.github/actions/prepare-workspace-env
       - uses: ./.github/actions/docker-build
       - uses: ./.github/actions/docker-run-tests
-
-      - name: package 
-        run: |
-          docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && cpack -G ${{ matrix.config.cpack_gen }} "
-          docker run -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && cp ./output/klogg.sym ./packages/klogg_${{ matrix.config.artifacts_id }}.sym"
-
-      - name: Check package
-        run: |
-          docker run --rm -v "$KLOGG_WORKSPACE/$KLOGG_BUILD_ROOT/packages":/usr/local ${{ matrix.config.check_container }} /bin/bash -c "${{ matrix.config.check_command }}"
-    
-      - name: Linux AppImage 
-        if: ${{ matrix.config.os == 'ubuntu' }}
-        run: |
-          docker run --device /dev/fuse --privileged --env KLOGG_VERSION=$KLOGG_VERSION -v "$KLOGG_WORKSPACE":/usr/local ${{ matrix.config.container }} /bin/bash -c "cd /usr/local/build_root && ../packaging/linux/appimage/generate_appimage.sh"
-
+      - uses: ./.github/actions/docker-package
           
 # Final upload of all packages
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v3
         with:
-          name: packages-${{ matrix.config.artifacts_id }}-${{ matrix.config.arch }}
+          name: packages-${{ matrix.config.artifacts_id }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
           if-no-files-found: error      
 
@@ -118,32 +152,25 @@ jobs:
       matrix:
         config:
           - os: macos
-            os_version: latest
+            os_version: 11
             qt_version: 5.15.2
+            qt_modules:
             arch: x64
-            cmake_opts:
+            artifacts_id: macos-qt5
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=10.14
+          - os: macos
+            os_version: 11
+            qt_version: 6.5.1
+            qt_modules: qt5compat
+            arch: x64
+            artifacts_id: macos-qt6
+            cmake_opts: -DKLOGG_OSX_DEPLOYMENT_TARGET=10.15
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
     steps:
-      - uses: actions/checkout@v2
-
+      - uses: actions/checkout@v3
+     
 #Install build deps
-      - uses: seanmiddleditch/gha-setup-ninja@master
-
-      - name: Cache Qt
-        id: cache-qt
-        uses: actions/cache@v1
-        with:
-          path: ../Qt
-          key: ${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ matrix.config.qt_version }}-QtCache
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v2
-        with:
-          version: ${{ matrix.config.qt_version }}
-          arch: ${{ matrix.config.qt_arch }}
-          cached: ${{ steps.cache-qt.outputs.cache-hit }}
-
       - name: Set brew env
         run: |
           echo "HOMEBREW_NO_ANALYTICS=1" >> $GITHUB_ENV
@@ -153,71 +180,22 @@ jobs:
       - name: Brew deps
         run: |
           brew install ragel
-      
-      - uses: ./.github/actions/prepare-boost
 
-#Build and test
+      - uses: ./.github/actions/agent-setup
       - uses: ./.github/actions/klogg-version
       - uses: ./.github/actions/prepare-workspace-env
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
-
-#Package
-      - name: Mac prepare codesign
-        if: ${{ github.event_name != 'pull_request' }} 
-        uses: apple-actions/import-codesign-certs@v1
-        with: 
+      - uses: ./.github/actions/agent-package-mac
+        with:
           p12-file-base64: ${{ secrets.CODESIGN_BASE64 }}
           p12-password: ${{ secrets.CODESIGN_PASSWORD }}
-
-      - name: Mac deploy Qt
-        run: |
-          cd $KLOGG_BUILD_ROOT
-          macdeployqt ./output/klogg.app -always-overwrite -verbose=2
-          $KLOGG_WORKSPACE/3rdparty/macdeployqtfix/macdeployqtfix.py ./output/klogg.app/Contents/MacOS/klogg $Qt5_Dir
-      
-      - name: Mac codesign binaries
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          cd $KLOGG_BUILD_ROOT
-          codesign -v -f -o runtime --deep --timestamp -s "Developer ID Application: Anton Filimonov (GAW773U324)" ./output/klogg.app;
-      
-      - name: Mac pack dmg
-        run: |
-          cd $KLOGG_BUILD_ROOT
-          cpack --verbose -G "DragNDrop"
-
-      - name: Mac codesign dmg
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          cd $KLOGG_BUILD_ROOT
-          codesign -v -f -o runtime --timestamp -s "Developer ID Application: Anton Filimonov (GAW773U324)" ./packages/*
-          
-      - name: "Mac notarize"
-        if: ${{ github.event_name != 'pull_request' }} 
-        uses: variar/xcode-notarize@v1.0.3
-        with:
-          product-path: "${{ env.KLOGG_BUILD_ROOT }}/packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
-          primary-bundle-id: "dev.filimonov.klogg"
           appstore-connect-username: ${{ secrets.NOTARIZATION_USERNAME }}
           appstore-connect-password: ${{ secrets.NOTARIZATION_PASSWORD }}
 
-      - name: "Mac staple"
-        if: ${{ github.event_name != 'pull_request' }} 
-        uses: devbotsxyz/xcode-staple@v1
+      - uses: actions/upload-artifact@v3
         with:
-          product-path: "${{ env.KLOGG_BUILD_ROOT }}/packages/klogg-${{ env.KLOGG_VERSION }}-OSX.dmg"
-
-      - name: Mac symbols
-        run: |
-          cd $KLOGG_BUILD_ROOT
-          cp -a ./output/klogg.dSym ./packages/
-          cp -a ./output/klogg.app ./packages/
-
-# Final upload of all packages
-      - uses: actions/upload-artifact@v2
-        with:
-          name: packages-${{ matrix.config.os }}-${{ matrix.config.arch }}
+          name: packages-${{ matrix.config.artifacts_id }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*' 
           if-no-files-found: error
 
@@ -228,51 +206,45 @@ jobs:
       matrix:
         config:
           - os: windows
-            os_version: latest
+            os_version: 2022
             qt_version: 5.15.2
             arch: x64
             ssl_arch: -x64
             cmake_opts:
+            artifacts_id: windows-x64-qt5
 
           - os: windows
-            os_version: latest
+            os_version: 2022
+            qt_version: 6.5.1
+            qt_modules: qt5compat
+            arch: x64
+            ssl_arch: -x64
+            cmake_opts:
+            artifacts_id: windows-x64-qt6
+
+          - os: windows
+            os_version: 2022
             qt_version: 5.15.2
             arch: x86
             qt_arch: win32_msvc2019
             cmake_opts:
+            artifacts_id: windows-x86-qt5
 
     runs-on: ${{ matrix.config.os }}-${{ matrix.config.os_version }}
     steps:
-      - uses: actions/checkout@v2
-
-#Install build deps
-      - uses: seanmiddleditch/gha-setup-ninja@master
-
-      - name: Cache Qt
-        id: cache-qt
-        uses: actions/cache@v1
-        with:
-          path: ../Qt
-          key: ${{ matrix.config.os }}-${{ matrix.config.arch }}-${{ matrix.config.qt_version }}-QtCache
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v2
-        with:
-          version: ${{ matrix.config.qt_version }}
-          arch: ${{ matrix.config.qt_arch }}
-          cached: ${{ steps.cache-qt.outputs.cache-hit }}
+      - uses: actions/checkout@v3
 
       - name: Cache openssl
         id: cache-openssl
         uses: actions/cache@v2
         with:
           path: ${{ github.workspace }}\openssl-1.1
-          key: OpensslCache-1-1-1l
+          key: OpensslCache-1-1-1n
 
       - name: Download openssl
         if: ${{ steps.cache-openssl.outputs.cache-hit != 'true' }} 
         run: |
-          Invoke-WebRequest -Uri "https://mirror.firedaemon.com/OpenSSL/openssl-1.1.1l.zip" -OutFile openssl.zip
+          Invoke-WebRequest -Uri "https://www.firedaemon.com/download-firedaemon-openssl-1-zip" -OutFile openssl.zip
           7z x openssl.zip 
 
       - name: Set openssl paths
@@ -281,62 +253,26 @@ jobs:
           echo "SSL_DIR=${{ github.workspace }}\openssl-1.1\${{ matrix.config.arch }}\bin" >> $GITHUB_ENV
           echo "SSL_ARCH=${{ matrix.config.ssl_arch }}" >> $GITHUB_ENV 
 
-      - uses: ./.github/actions/prepare-boost
-     
-#Build and test
+      - uses: ./.github/actions/agent-setup
+      - uses: ./.github/actions/klogg-version
+      - uses: ./.github/actions/prepare-workspace-env
+      
       - name: Prepare dev cmd
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.config.arch }}
 
-      - uses: ./.github/actions/klogg-version
-      - uses: ./.github/actions/prepare-workspace-env
       - uses: ./.github/actions/agent-build
       - uses: ./.github/actions/agent-run-tests
-
-#Package
-      #- name: Win codesign executables
-      #  if: ${{ github.event_name != 'pull_request' }}
-      #  uses: apptim/code-sign-action@v8
-      #  with:
-      #    certificate: '${{ secrets.MS_CODESIGN_BASE64 }}'
-      #    password: '${{ secrets.MS_CODESIGN_PASSWORD }}'
-      #    certificatesha1: '${{ secrets.MS_CODESIGN_HASH }}'
-      #    folder: '${{ env.KLOGG_BUILD_ROOT }}\output'
-      #    recursive: true
-
-      - name: Win portable
-        shell: cmd
-        run: |
-          packaging\windows\prepare_release.cmd
-
-      - name: Win installer
-        uses: joncloud/makensis-action@v3.3
+      - uses: ./.github/actions/agent-package-win
         with:
-          script-file: klogg.nsi
-          arguments: "-DVERSION=%KLOGG_VERSION% -DPLATFORM=%KLOGG_ARCH%"
-
-      - name: Win package
-        shell: cmd
-        run: |
-          md %KLOGG_BUILD_ROOT%\packages
-          xcopy klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-portable.zip %KLOGG_BUILD_ROOT%\packages\ /y
-          xcopy klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-pdb.zip %KLOGG_BUILD_ROOT%\packages\ /y
-          xcopy klogg-%KLOGG_VERSION%-%KLOGG_ARCH%-setup.exe %KLOGG_BUILD_ROOT%\packages\ /y
-
-      #- name: Win codesign installer
-      #  if: ${{ github.event_name != 'pull_request' }}
-      #  uses: apptim/code-sign-action@v8
-      #  with:
-      #    certificate: '${{ secrets.MS_CODESIGN_BASE64 }}'
-      #    password: '${{ secrets.MS_CODESIGN_PASSWORD }}'
-      #    certificatesha1: '${{ secrets.MS_CODESIGN_HASH }}'
-      #    folder: '${{ env.KLOGG_BUILD_ROOT }}\packages'
-      #    recursive: true 
-      
+          s3-key-id: ${{ secrets.WIN_CS_KEY_ID }}
+          s3-secret: ${{ secrets.WIN_CS_SECRET }}
+          s3-bucket: ${{ secrets.WIN_CS_BUCKET }}
+     
 # Final upload of all packages
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v3
         with:
-          name: packages-${{ matrix.config.os }}-${{ matrix.config.arch }}
+          name: packages-${{ matrix.config.artifacts_id }}
           path: '${{ env.KLOGG_BUILD_ROOT }}/packages/*'
           if-no-files-found: error

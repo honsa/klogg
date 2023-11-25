@@ -40,13 +40,16 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QMenu>
 #include <QSystemTrayIcon>
 #include <QTemporaryDir>
 
+#include <QTranslator>
 #include <array>
 #include <memory>
 #include <mutex>
 
+#include "configuration.h"
 #include "crawlerwidget.h"
 #include "downloader.h"
 #include "iconloader.h"
@@ -62,6 +65,7 @@ class QAction;
 class QActionGroup;
 class Session;
 class RecentFiles;
+class HighlightersMenu;
 
 // Main window of the application, creates menus, toolbar and
 // the CrawlerWidget
@@ -79,7 +83,11 @@ class MainWindow : public QMainWindow {
     // Loads the initial file (parameter passed or from config file)
     void loadInitialFile( QString fileName, bool followFile );
 
-  public slots:
+    void reTranslateUI();
+
+    static int installLanguage( QString lang );
+
+  public Q_SLOTS:
     // Load a file in a new tab (non-interactive)
     // (for use from e.g. IPC)
     void loadFileNonInteractive( const QString& file_name );
@@ -95,20 +103,15 @@ class MainWindow : public QMainWindow {
     bool event( QEvent* event ) override;
 
   private:
-    enum class ActionInitiator
-    {
-      User,
-      App
-    };
+    enum class ActionInitiator { User, App };
 
-  private slots:
+  private Q_SLOTS:
     void open();
     void openFileFromRecent( QAction* action );
     void openFileFromFavorites( QAction* action );
     void switchToOpenedFile( QAction* action );
-    void setCurrentHighlighter( QAction* action );
-    void closeTab(ActionInitiator initiator);
-    void closeAll(ActionInitiator initiator);
+    void closeTab( ActionInitiator initiator );
+    void closeAll( ActionInitiator initiator );
     void selectAll();
     void copy();
     void find();
@@ -125,6 +128,8 @@ class MainWindow : public QMainWindow {
     void aboutQt();
     void documentation();
     void showScratchPad();
+    void sendToScratchpad( QString );
+    void replaceDataInScratchpad( QString );
     void encodingChanged( QAction* action );
     void addToFavorites();
     void removeFromFavorites();
@@ -139,9 +144,10 @@ class MainWindow : public QMainWindow {
     // Change the follow mode checkbox and send the followSet signal down
     void changeFollowMode( bool follow );
 
-    // Update the line number displayed in the status bar.
+    // Update the selection information displayed in the status bar.
     // Must be passed as the internal (starts at 0) line number.
-    void lineNumberHandler( LineNumber line );
+    void lineNumberHandler( LineNumber startLine, LinesCount nLines, LineColumn startCol,
+                            LineLength nSymbols );
 
     // Save current search in line edit as predefined filter.
     // Opens dialog with new entry.
@@ -159,6 +165,9 @@ class MainWindow : public QMainWindow {
     void handleSearchRefreshChanged( bool isRefreshing );
     void handleMatchCaseChanged( bool matchCase );
 
+    // Update quick find searchable
+    void handleFilteredViewChanged();
+
     // Close the tab with the passed index
     void closeTab( int index, ActionInitiator initiator );
     // Setup the tab with current index for view
@@ -168,11 +177,13 @@ class MainWindow : public QMainWindow {
     // and confirm it.
     void changeQFPattern( const QString& newPattern );
 
-  signals:
+  Q_SIGNALS:
     // Is emitted when new settings must be used
     void optionsChanged();
     // Is emitted when the 'follow' option is enabled/disabled
     void followSet( bool checked );
+    // Is emitted when the 'text wrap' option is enabled/disabled
+    void textWrapSet( bool checked );
     // Is emitted before the QuickFind box is activated,
     // to allow crawlers to get search in the right view.
     void enteringQuickFind();
@@ -198,6 +209,7 @@ class MainWindow : public QMainWindow {
     void updateTitleBar( const QString& fileName );
     void addRecentFile( const QString& fileName );
     void updateRecentFileActions();
+    void clearRecentFileActions();
     void updateFavoritesMenu();
     void updateOpenedFilesMenu();
     void updateHighlightersMenu();
@@ -216,16 +228,16 @@ class MainWindow : public QMainWindow {
     WindowSession session_;
     QString loadingFileName;
 
-    enum { MaxRecentFiles = 5 };
-    std::array<QAction*, MaxRecentFiles> recentFileActions;
+    std::array<QAction*, MAX_RECENT_FILES> recentFileActions;
     QActionGroup* recentFilesGroup;
 
     QMenu* fileMenu;
+    QMenu* recentFilesMenu;
     QMenu* editMenu;
     QMenu* viewMenu;
     QMenu* toolsMenu;
     QMenu* favoritesMenu;
-    QMenu* highlightersMenu;
+    HighlightersMenu* highlightersMenu;
     QMenu* openedFilesMenu;
     QMenu* helpMenu;
 
@@ -257,6 +269,7 @@ class MainWindow : public QMainWindow {
     QAction* lineNumbersVisibleInMainAction;
     QAction* lineNumbersVisibleInFilteredAction;
     QAction* followAction;
+    QAction* textWrapAction;
     QAction* reloadAction;
     QAction* stopAction;
     QAction* editHighlightersAction;
@@ -275,6 +288,7 @@ class MainWindow : public QMainWindow {
     QAction* addToFavoritesMenuAction;
     QAction* removeFromFavoritesAction;
     QAction* selectOpenFileAction;
+    QAction* recentFilesCleanup;
     QActionGroup* favoritesGroup;
     QActionGroup* openedFilesGroup;
     QActionGroup* highlightersActionGroup = nullptr;
@@ -289,6 +303,9 @@ class MainWindow : public QMainWindow {
 
     // Multiplex signals to any of the CrawlerWidgets
     SignalMux signalMux_;
+
+    static QTranslator mTranslator;
+    static QTranslator mQtTranslator;
 
     // QuickFind widget
     QuickFindWidget quickFindWidget_;

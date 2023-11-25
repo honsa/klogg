@@ -20,18 +20,22 @@
 #ifndef KLOGG_TABBEDSCRATCHPAD_H
 #define KLOGG_TABBEDSCRATCHPAD_H
 
-#include <QWidget>
-#include <QTabWidget>
 #include <QKeyEvent>
+#include <QTabWidget>
+#include <QWidget>
 
 class TabbedScratchPad : public QWidget {
-  Q_OBJECT
+    Q_OBJECT
   public:
     explicit TabbedScratchPad( QWidget* parent = nullptr );
 
     ~TabbedScratchPad() = default;
     TabbedScratchPad( const TabbedScratchPad& ) = delete;
     TabbedScratchPad& operator=( const TabbedScratchPad& ) = delete;
+
+  public Q_SLOTS:
+    void addData( QString data );
+    void replaceData( QString data );
 
   protected:
     void keyPressEvent( QKeyEvent* event ) override;
@@ -40,7 +44,7 @@ class TabbedScratchPad : public QWidget {
     void addTab();
 
   private:
-    QTabWidget* tabWidget_ { nullptr};
+    QTabWidget* tabWidget_{ nullptr };
     int tabCounter_{};
 };
 

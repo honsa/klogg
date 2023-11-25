@@ -38,22 +38,22 @@
 
 // This file implements LogData, the content of a log file.
 
-#include <cassert>
-#include <cstddef>
-#include <iostream>
-#include <iterator>
+#include <algorithm>
+#include <limits>
 #include <numeric>
 #include <qregularexpression.h>
+#include <qtextcodec.h>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include <QFileInfo>
-#include <QIODevice>
 
-#include <simdutf/simdutf.h>
+#include <simdutf.h>
 
 #include "configuration.h"
+#include "containers.h"
+#include "linetypes.h"
 #include "log.h"
 #include "logfiltereddata.h"
 
@@ -85,6 +85,11 @@ LogData::LogData()
 
     if ( keepFileClosed_ ) {
         LOG_INFO << "Keep file closed option is set";
+    }
+
+    const auto defaultEncodingMib = config.defaultEncodingMib();
+    if ( defaultEncodingMib >= 0 ) {
+        codec_.setCodec( QTextCodec::codecForMib( defaultEncodingMib ) );
     }
 }
 
@@ -212,7 +217,7 @@ void LogData::indexingFinished( LoadingStatus status )
     fileChangedOnDisk_ = MonitoredFileStatus::Unchanged;
 
     LOG_DEBUG << "Sending indexingFinished.";
-    emit loadingFinished( status );
+    Q_EMIT loadingFinished( status );
 
     operationQueue_.finishOperationAndStartNext();
 }
@@ -221,7 +226,7 @@ void LogData::checkFileChangesFinished( MonitoredFileStatus status )
 {
     attached_file_->detachReader();
 
-    LOG_INFO << "File " << indexingFileName_ << " status " << static_cast<int>( status );
+    LOG_INFO << "File " << indexingFileName_ << " status " << static_cast<uint8_t>( status );
 
     if ( fileChangedOnDisk_ != MonitoredFileStatus::Truncated ) {
         switch ( status ) {
@@ -244,7 +249,7 @@ void LogData::checkFileChangesFinished( MonitoredFileStatus status )
 
     if ( status != MonitoredFileStatus::Unchanged
          || fileChangedOnDisk_ == MonitoredFileStatus::Truncated ) {
-        emit fileChanged( fileChangedOnDisk_ );
+        Q_EMIT fileChanged( fileChangedOnDisk_ );
     }
 
     operationQueue_.finishOperationAndStartNext();
@@ -269,7 +274,7 @@ LineLength LogData::doGetLineLength( LineNumber line ) const
         return 0_length; /* exception? */
     }
 
-    return LineLength( doGetExpandedLineString( line ).length() );
+    return LineLength{ doGetExpandedLineString( line ).size() };
 }
 
 void LogData::doSetDisplayEncoding( const char* encoding )
@@ -287,7 +292,7 @@ void LogData::doSetDisplayEncoding( const char* encoding )
             currentIndexCodec = scopedAccessor.getEncodingGuess();
         }
 
-        if ( codec_.mibEnum() != currentIndexCodec->mibEnum() ) {
+        if ( currentIndexCodec && codec_.mibEnum() != currentIndexCodec->mibEnum() ) {
             if ( codec_.encodingParameters() != EncodingParameters( currentIndexCodec ) ) {
                 needReload = true;
                 useGuessedCodec = codec_.mibEnum() == scopedAccessor.getEncodingGuess()->mibEnum();
@@ -319,7 +324,7 @@ QString LogData::doGetExpandedLineString( LineNumber line ) const
 // Note this function is also called from the LogFilteredDataWorker thread, so
 // data must be protected because they are changed in the main thread (by
 // indexingFinished).
-std::vector<QString> LogData::doGetLines( LineNumber first_line, LinesCount number ) const
+klogg::vector<QString> LogData::doGetLines( LineNumber first_line, LinesCount number ) const
 {
     return getLinesFromFile( first_line, number, []( QString&& lineData ) {
         if ( lineData.endsWith( QChar::CarriageReturn ) ) {
@@ -329,23 +334,27 @@ std::vector<QString> LogData::doGetLines( LineNumber first_line, LinesCount numb
     } );
 }
 
-std::vector<QString> LogData::doGetExpandedLines( LineNumber first_line, LinesCount number ) const
+klogg::vector<QString> LogData::doGetExpandedLines( LineNumber first_line, LinesCount number ) const
 {
     return getLinesFromFile( first_line, number, []( QString&& lineData ) {
         return untabify( std::move( lineData ) );
     } );
 }
 
+LineNumber LogData::doGetLineNumber( LineNumber index ) const
+{
+    return index;
+}
+
 LogData::RawLines LogData::getLinesRaw( LineNumber firstLine, LinesCount number ) const
 {
     RawLines rawLines;
     rawLines.startLine = firstLine;
-    rawLines.numberOfLines = number;
 
     try {
-        const auto lastLine = firstLine + number - 1_lcount;
-
         rawLines.endOfLines.reserve( number.get() );
+        klogg::vector<LineNumber> lineNumbers{ static_cast<size_t>( number.get() ) };
+        std::iota( lineNumbers.begin(), lineNumbers.end(), firstLine );
 
         IndexingData::ConstAccessor scopedAccessor{ indexing_data_.get() };
         rawLines.prefilterPattern
@@ -353,28 +362,31 @@ LogData::RawLines LogData::getLinesRaw( LineNumber firstLine, LinesCount number 
                   prefilterPattern_, QRegularExpression::CaseInsensitiveOption )
                                            : QRegularExpression{};
 
-        if ( lastLine >= scopedAccessor.getNbLines() ) {
+        if ( lineNumbers.back() >= scopedAccessor.getNbLines() ) {
             LOG_WARNING << "Lines out of bound asked for";
             return {}; /* exception? */
         }
 
-        ScopedFileHolder<FileHolder> locker( attached_file_.get() );
+        ScopedFileHolder<FileHolder> fileHolder( attached_file_.get() );
 
-        const auto firstByte = ( firstLine.get() == 0 )
-                                   ? 0
-                                   : scopedAccessor.getPosForLine( firstLine - 1_lcount ).get();
-        const auto lastByte = scopedAccessor.getPosForLine( lastLine ).get();
+        const auto firstByte
+            = ( firstLine == 0_lnum )
+                  ? 0
+                  : scopedAccessor.getEndOfLineOffset( firstLine - 1_lcount ).get();
+        const auto lastByte = scopedAccessor.getEndOfLineOffset( lineNumbers.back() ).get();
 
-        for ( LineNumber line = firstLine; ( line <= lastLine ); ++line ) {
-            rawLines.endOfLines.push_back( scopedAccessor.getPosForLine( line ).get() - firstByte );
-        }
+        std::transform( lineNumbers.begin(), lineNumbers.end(),
+                        std::back_inserter( rawLines.endOfLines ),
+                        [ &scopedAccessor, firstByte ]( const LineNumber& line ) {
+                            return scopedAccessor.getEndOfLineOffset( line ).get() - firstByte;
+                        } );
 
         const auto bytesToRead = lastByte - firstByte;
         LOG_DEBUG << "will try to read:" << bytesToRead << " bytes";
         rawLines.buffer.resize( static_cast<std::size_t>( bytesToRead ) );
 
-        locker.getFile()->seek( firstByte );
-        const auto bytesRead = locker.getFile()->read( rawLines.buffer.data(), bytesToRead );
+        fileHolder.getFile()->seek( firstByte );
+        const auto bytesRead = fileHolder.getFile()->read( rawLines.buffer.data(), bytesToRead );
 
         if ( bytesRead != bytesToRead ) {
             LOG_DEBUG << "failed to read " << bytesToRead << " bytes, got " << bytesRead;
@@ -388,21 +400,20 @@ LogData::RawLines LogData::getLinesRaw( LineNumber firstLine, LinesCount number 
         LOG_ERROR << "not enough memory";
         rawLines.endOfLines.clear();
         rawLines.buffer.clear();
-        rawLines.numberOfLines = 0_lcount;
         return rawLines;
     }
 }
 
-std::vector<QString> LogData::getLinesFromFile( LineNumber firstLine, LinesCount number,
-                                                QString ( *processLine )( QString&& ) ) const
+klogg::vector<QString> LogData::getLinesFromFile( LineNumber firstLine, LinesCount number,
+                                                  QString ( *processLine )( QString&& ) ) const
 {
     LOG_DEBUG << "firstLine:" << firstLine << " nb:" << number;
 
     if ( number.get() == 0 ) {
-        return std::vector<QString>();
+        return klogg::vector<QString>();
     }
 
-    std::vector<QString> processedLines;
+    klogg::vector<QString> processedLines;
     try {
         const auto rawLines = getLinesRaw( firstLine, number );
         auto decodedLines = rawLines.decodeLines();
@@ -418,6 +429,7 @@ std::vector<QString> LogData::getLinesFromFile( LineNumber firstLine, LinesCount
         processedLines.emplace_back( "KLOGG WARNING: not enough memory" );
     }
 
+    processedLines.reserve( number.get() - processedLines.size() );
     while ( processedLines.size() < number.get() ) {
         processedLines.emplace_back( "KLOGG WARNING: failed to read some lines before this one" );
     }
@@ -440,43 +452,38 @@ void LogData::doDetachReader() const
     attached_file_->detachReader();
 }
 
-std::vector<QString> LogData::RawLines::decodeLines() const
+klogg::vector<QString> LogData::RawLines::decodeLines() const
 {
-
-    if ( numberOfLines.get() == 0 ) {
-        return std::vector<QString>();
+    if ( this->endOfLines.empty() ) {
+        return klogg::vector<QString>();
     }
 
-    std::vector<QString> decodedLines;
-    decodedLines.reserve( numberOfLines.get() );
-
-    const auto lastLine = startLine + numberOfLines - 1_lcount;
+    klogg::vector<QString> decodedLines;
+    decodedLines.reserve( this->endOfLines.size() );
 
     try {
         qint64 lineStart = 0;
-        size_t currentLine = 0;
+        size_t currentLineIndex = 0;
         const auto lineFeedWidth = textDecoder.encodingParams.lineFeedWidth;
-
-        for ( LineNumber line = startLine; ( line <= lastLine ); ++line, ++currentLine ) {
-            const auto lineEnd = endOfLines[ currentLine ];
-
+        for ( const auto& lineEnd : this->endOfLines ) {
             const auto length = lineEnd - lineStart - lineFeedWidth;
+            LOG_DEBUG << "line " << this->startLine.get() + currentLineIndex << ", length "
+                      << length;
 
-            LOG_DEBUG << "line " << line << ", length " << length;
-
-            if ( length >= std::numeric_limits<LineLength::UnderlyingType>::max() / 2 ) {
+            constexpr auto maxlength = std::numeric_limits<int>::max() / 2;
+            if ( length >= maxlength ) {
                 decodedLines.emplace_back( "KLOGG WARNING: this line is too long" );
                 break;
             }
 
-            if ( lineStart + length > static_cast<qint64>( buffer.size() ) ) {
+            if ( lineStart + length > klogg::ssize( buffer ) ) {
                 decodedLines.emplace_back( "KLOGG WARNING: file read failed" );
                 LOG_WARNING << "not enough data in buffer";
                 break;
             }
 
-            auto decodedLine = textDecoder.decoder->toUnicode( buffer.data() + lineStart,
-                                                               static_cast<int>( length ) );
+            auto decodedLine = textDecoder.decoder->toUnicode(
+                buffer.data() + lineStart, type_safe::narrow_cast<int>( length ) );
 
             if ( !prefilterPattern.pattern().isEmpty() ) {
                 decodedLine.remove( prefilterPattern );
@@ -491,25 +498,26 @@ std::vector<QString> LogData::RawLines::decodeLines() const
         decodedLines.emplace_back( "KLOGG WARNING: not enough memory" );
     }
 
-    while ( decodedLines.size() < numberOfLines.get() ) {
-        decodedLines.emplace_back( "KLOGG WARNING: failed to read some lines before this one" );
+    decodedLines.reserve( this->endOfLines.size() - decodedLines.size() );
+    while ( decodedLines.size() < this->endOfLines.size() ) {
+        decodedLines.emplace_back( "KLOGG WARNING: failed to decode some lines before this one" );
     }
 
     return decodedLines;
 }
 
-std::vector<std::string_view> LogData::RawLines::buildUtf8View() const
+klogg::vector<std::string_view> LogData::RawLines::buildUtf8View() const
 {
-    std::vector<std::string_view> lines;
-    if ( numberOfLines == 0_lcount || textDecoder.decoder == nullptr ) {
+    klogg::vector<std::string_view> lines;
+    if ( this->endOfLines.empty() || textDecoder.decoder == nullptr ) {
         return lines;
     }
 
     try {
-        const auto optimizeForNotLatinEncodings
-            = Configuration::get().optimizeForNotLatinEncodings();
+        // const auto optimizeForNotLatinEncodings
+        //     = Configuration::get().optimizeForNotLatinEncodings();
 
-        lines.reserve( numberOfLines.get() );
+        lines.reserve( endOfLines.size() );
 
         std::string_view wholeString;
 
@@ -521,11 +529,10 @@ std::vector<std::string_view> LogData::RawLines::buildUtf8View() const
             QString utf16Data;
             if ( prefilterPattern.pattern().isEmpty() && textDecoder.encodingParams.isUtf16LE ) {
                 utf16Data = QString::fromRawData( reinterpret_cast<const QChar*>( buffer.data() ),
-                                                  static_cast<int>( buffer.size() / 2 ) );
+                                                  klogg::isize( buffer ) / 2 );
             }
             else {
-                utf16Data = textDecoder.decoder->toUnicode( buffer.data(),
-                                                            static_cast<int>( buffer.size() ) );
+                utf16Data = textDecoder.decoder->toUnicode( buffer.data(), klogg::isize( buffer ) );
             }
 
             if ( !prefilterPattern.pattern().isEmpty() ) {
@@ -533,16 +540,16 @@ std::vector<std::string_view> LogData::RawLines::buildUtf8View() const
             }
 
             size_t resultSize = 0;
-            if ( !optimizeForNotLatinEncodings ) {
-                utf8Data_ = utf16Data.toUtf8();
-                resultSize = static_cast<size_t>( utf8Data_.size() );
-            }
-            else {
-                utf8Data_.resize( static_cast<int>( buffer.size() * 2 ) );
-                resultSize = simdutf::convert_utf16_to_utf8(
-                    reinterpret_cast<const char16_t*>( utf16Data.utf16() ),
-                    static_cast<size_t>( utf16Data.length() ), utf8Data_.data() );
-            }
+            // if ( !optimizeForNotLatinEncodings ) {
+            //     utf8Data_ = utf16Data.toUtf8();
+            //     resultSize = static_cast<size_t>( utf8Data_.size() );
+            // }
+            // else {
+            utf8Data_.resize( buffer.size() * 2 );
+            resultSize = simdutf::convert_utf16_to_utf8(
+                reinterpret_cast<const char16_t*>( utf16Data.utf16() ),
+                static_cast<size_t>( utf16Data.size() ), utf8Data_.data() );
+            // }
 
             wholeString = { utf8Data_.data(), resultSize };
         }
@@ -561,8 +568,9 @@ std::vector<std::string_view> LogData::RawLines::buildUtf8View() const
     } catch ( const std::exception& e ) {
         LOG_ERROR << "failed to transform lines to utf8 " << e.what();
         const auto lastLineOffset = utf8Data_.size();
-        utf8Data_.append( "KLOGG WARNING: not enough memory, try decrease search buffer" );
-        while ( lines.size() < numberOfLines.get() ) {
+        // utf8Data_.append( "KLOGG WARNING: not enough memory, try decrease search buffer" );
+        lines.reserve( this->endOfLines.size() - lines.size() );
+        while ( lines.size() < this->endOfLines.size() ) {
             lines.emplace_back( utf8Data_.data() + lastLineOffset,
                                 utf8Data_.size() - lastLineOffset );
         }

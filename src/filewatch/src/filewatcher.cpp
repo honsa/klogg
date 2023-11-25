@@ -29,7 +29,9 @@
 
 #include <vector>
 
-#include <QDateTime>
+#if QT_VERSION_MAJOR < 6
+#include <QDateTime> // Qt5 use
+#endif
 #include <QDir>
 #include <QFileInfo>
 #include <QTimer>
@@ -91,7 +93,7 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
             }
         }
         else {
-            for ( auto& dir : watchedPaths_ ) {
+            for ( const auto& dir : watchedPaths_ ) {
                 LOG_INFO << "Will disable watch for " << dir.name;
                 watcher_.removeWatch( dir.watchId );
             }
@@ -161,7 +163,6 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
 
         const QFileInfo fileInfo = QFileInfo( fullFileName );
 
-        const auto filename = fileInfo.fileName().toStdString();
         const auto directory = fileInfo.absolutePath().toStdString();
 
         auto watchedDirectory
@@ -169,15 +170,17 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
                             [ &directory ]( const auto& wd ) { return wd.name == directory; } );
 
         if ( watchedDirectory != watchedPaths_.end() ) {
+            const auto filename = fileInfo.fileName().toStdString();
 
-            auto watchedFile = std::find( watchedDirectory->files.begin(),
-                                          watchedDirectory->files.end(), filename );
+            auto& files = watchedDirectory->files;
 
-            if ( watchedFile != watchedDirectory->files.end() ) {
-                watchedDirectory->files.erase( watchedFile );
+            auto watchedFile = std::find( files.begin(), files.end(), filename );
+
+            if ( watchedFile != files.end() ) {
+                files.erase( watchedFile );
             }
 
-            if ( watchedDirectory->files.empty() ) {
+            if ( files.empty() ) {
 
                 if ( !isOnlyForPolling( *watchedDirectory ) ) {
                     watcher_.removeWatch( watchedDirectory->watchId );
@@ -255,12 +258,12 @@ class EfswFileWatcher final : public efsw::FileWatchListener {
             qtDir.chop( 1 );
         }
 
-        const auto directory = qtDir.toStdString();
+        const auto& directory = qtDir.toStdString();
 
         LOG_DEBUG << "fileChangedOnDisk " << directory << " " << filename << ", old name "
                   << oldFilename;
 
-        const auto fullChangedFilename = findChangedFilename( directory, filename, oldFilename );
+        const auto& fullChangedFilename = findChangedFilename( directory, filename, oldFilename );
 
         if ( !fullChangedFilename.isEmpty() ) {
             dispatchToMainThread( [ watcher = parent_, fullChangedFilename ]() {
@@ -327,12 +330,12 @@ void EfswFileWatcherDeleter::operator()( EfswFileWatcher* watcher ) const
 
 FileWatcher::FileWatcher()
     : checkTimer_{ new QTimer( this ) }
-    , throttler_{ new KDToolBox::KDSignalLeadingDebouncer( this ) }
+    , throttler_{ new KDToolBox::KDSignalThrottler( this ) }
     , efswWatcher_{ new EfswFileWatcher( this ) }
 {
     connect( checkTimer_, &QTimer::timeout, this, &FileWatcher::checkWatches );
 
-    throttler_->setTimeout( 500 );
+    throttler_->setTimeout( 250 );
     connect( this, &FileWatcher::notifyFileChangedOnDisk, throttler_,
              &KDToolBox::KDGenericSignalThrottler::throttle );
     connect( throttler_, &KDToolBox::KDGenericSignalThrottler::triggered, this,
@@ -350,14 +353,12 @@ FileWatcher& FileWatcher::getFileWatcher()
 void FileWatcher::addFile( const QString& fileName )
 {
     efswWatcher_->addFile( fileName );
-
     updateConfiguration();
 }
 
 void FileWatcher::removeFile( const QString& fileName )
 {
     efswWatcher_->removeFile( fileName );
-
     updateConfiguration();
 }
 
@@ -367,13 +368,13 @@ void FileWatcher::fileChangedOnDisk( const QString& fileName )
         changes_.push_back( fileName );
     }
 
-    emit notifyFileChangedOnDisk();
+    Q_EMIT notifyFileChangedOnDisk();
 }
 
 void FileWatcher::sendChangesNotifications()
 {
     for ( const auto& fileName : changes_ ) {
-        emit fileChanged( fileName );
+        Q_EMIT fileChanged( fileName );
     }
 
     changes_.clear();

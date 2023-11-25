@@ -39,15 +39,19 @@
 #ifndef LOGDATAWORKERTHREAD_H
 #define LOGDATAWORKERTHREAD_H
 
-#include <oneapi/tbb/task_group.h>
+#include "containers.h"
+#include <qthreadpool.h>
 #include <variant>
 
 #include <QObject>
 #include <QFile>
 #include <QTextCodec>
 
+#if !defined(Q_MOC_RUN)
+#include <tbb/enumerable_thread_specific.h>
 #include <tbb/flow_graph.h>
 #include <tbb/task_group.h>
+#endif
 
 #include "atomicflag.h"
 #include "filedigest.h"
@@ -104,9 +108,9 @@ class IndexingDataAccessor {
 
     // Get the position (in byte from the beginning of the file)
     // of the end of the passed line.
-    LineOffset getPosForLine( LineNumber line ) const
+    OffsetInFile getEndOfLineOffset( LineNumber line ) const
     {
-        return data_->getPosForLine( line );
+        return data_->getEndOfLineOffset( line );
     }
 
     // Get the guessed encoding for the content.
@@ -130,7 +134,7 @@ class IndexingDataAccessor {
 
     // Atomically add to all the existing
     // indexing data.
-    void addAll( const QByteArray& block, LineLength length,
+    void addAll( const klogg::vector<char>& block, LineLength length,
                  const FastLinePositionArray& linePosition, QTextCodec* encoding )
     {
         data_->addAll( block, length, linePosition, encoding );
@@ -194,7 +198,7 @@ class IndexingData {
 
     // Get the position (in byte from the beginning of the file)
     // of the end of the passed line.
-    LineOffset getPosForLine( LineNumber line ) const;
+    OffsetInFile getEndOfLineOffset( LineNumber line ) const;
 
     // Get the guessed encoding for the content.
     QTextCodec* getEncodingGuess() const;
@@ -205,7 +209,7 @@ class IndexingData {
 
     // Atomically add to all the existing
     // indexing data.
-    void addAll( const QByteArray& block, LineLength length,
+    void addAll( const klogg::vector<char>& block, LineLength length,
                  const FastLinePositionArray& linePosition, QTextCodec* encoding );
 
     // Completely clear the indexing data.
@@ -220,6 +224,8 @@ class IndexingData {
     mutable SharedMutex dataMutex_;
 
     LinePositionArray linePosition_;
+    mutable tbb::enumerable_thread_specific<CompressedLinePositionStorage::Cache> linePositionCache_;
+
     LineLength maxLength_;
 
     int progress_{};
@@ -239,11 +245,11 @@ class IndexingData {
 struct IndexingState {
 
     EncodingParameters encodingParams;
-    LineOffset::UnderlyingType pos{};
-    int64_t max_length{};
+    OffsetInFile::UnderlyingType pos{};
+    LineLength::UnderlyingType max_length{};
     LineLength::UnderlyingType additional_spaces{};
-    LineOffset::UnderlyingType end{};
-    LineOffset::UnderlyingType file_size{};
+    OffsetInFile::UnderlyingType end{};
+    OffsetInFile::UnderlyingType file_size{};
 
     QTextCodec* encodingGuess{};
     QTextCodec* fileTextCodec{};
@@ -266,31 +272,32 @@ class IndexOperation : public QObject {
     // and false if it has been cancelled (results not copied)
     virtual OperationResult run() = 0;
 
-  signals:
+  Q_SIGNALS:
     void indexingProgressed( int );
     void indexingFinished( bool );
     void fileCheckFinished( MonitoredFileStatus );
 
   protected:
-    using BlockData = std::pair<LineOffset::UnderlyingType, QByteArray>;
-    using BlockReader = tbb::flow::async_node<tbb::flow::continue_msg, BlockData>;
+    using BlockBuffer = klogg::vector<char>;
+    using BlockData = std::pair<OffsetInFile::UnderlyingType, BlockBuffer*>;
+    using BlockPrefetcher = tbb::flow::limiter_node<BlockData>;
 
     // Returns the total size indexed
     // Modify the passed linePosition and maxLength
-    void doIndex( LineOffset initialPosition );
+    void doIndex( OffsetInFile initialPosition );
 
     QString fileName_;
     std::shared_ptr<IndexingData> indexing_data_;
     AtomicFlag& interruptRequest_;
 
   private:
-    FastLinePositionArray parseDataBlock( LineOffset::UnderlyingType blockBegining,
-                                          const QByteArray& block, IndexingState& state ) const;
+    FastLinePositionArray parseDataBlock( OffsetInFile::UnderlyingType blockBegining,
+                                          const BlockBuffer& block, IndexingState& state ) const;
 
-    void guessEncoding( const QByteArray& block, IndexingData::MutateAccessor& scopedAccessor,
+    void guessEncoding( const BlockBuffer& block, IndexingData::MutateAccessor& scopedAccessor,
                         IndexingState& state ) const;
 
-    std::chrono::microseconds readFileInBlocks( QFile& file, BlockReader::gateway_type& gw );
+    std::chrono::microseconds readFileInBlocks( QFile& file, BlockPrefetcher& blockPrefetcher );
     void indexNextBlock( IndexingState& state, const BlockData& blockData );
 };
 
@@ -368,7 +375,7 @@ class LogDataWorker : public QObject {
     // Interrupts the indexing if one is in progress
     void interrupt();
 
-  signals:
+  Q_SIGNALS:
     // Sent during the indexing process to signal progress
     // percent being the percentage of completion.
     void indexingProgressed( int percent );
@@ -380,20 +387,18 @@ class LogDataWorker : public QObject {
     // to copy the new data back.
     void checkFileChangesFinished( MonitoredFileStatus status );
 
-  private slots:
+  private Q_SLOTS:
     void onIndexingFinished( bool result );
     void onCheckFileFinished( MonitoredFileStatus result );
 
   private:
     OperationResult connectSignalsAndRun( IndexOperation* operationRequested );
-    void waitForDone();
 
-    tbb::task_group operationsExecuter_;
-
+    // Mutex to wait for operations
+    QThreadPool operationsPool_;
+    Mutex operationsMutex_;
     AtomicFlag interruptRequest_;
 
-    // Mutex to protect operationRequested_ and friends
-    Mutex mutex_;
     QString fileName_;
 
     // Pointer to the owner's indexing data (we modify it)

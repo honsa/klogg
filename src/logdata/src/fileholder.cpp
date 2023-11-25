@@ -37,10 +37,12 @@ void openFileByHandle( QFile* file )
                        &securityAtts, creationDisp, FILE_ATTRIBUTE_NORMAL, NULL );
 
     if ( fileHandle != INVALID_HANDLE_VALUE ) {
+        LOG_INFO << "Got native file handle " << (intptr_t)fileHandle;
         // Convert the HANDLE to an fd and pass it to QFile's foreign-open
         // function. The fd owns the handle, so when QFile later closes
         // the fd the handle will be closed too.
         int fd = _open_osfhandle( (intptr_t)fileHandle, _O_RDONLY );
+        LOG_INFO << "Got fd " << fd;
         if ( fd != -1 ) {
             openedByHandle = file->open( fd, QIODevice::ReadOnly, QFile::AutoCloseHandle );
         }
@@ -56,16 +58,20 @@ void openFileByHandle( QFile* file )
     if ( !openedByHandle ) {
         file->open( QIODevice::ReadOnly );
     }
+    LOG_INFO << "QFile opened";
 }
 } // namespace
 
 FileHolder::FileHolder( bool keepClosed )
     : keep_closed_{ keepClosed }
 {
+    LOG_INFO << "created file holder " << reinterpret_cast<void*>(this);
 }
 
 FileHolder::~FileHolder()
 {
+    LOG_INFO << "destroy file holder "  << reinterpret_cast<void*>(this) << " for " << file_name_;
+
     try {
         // Remove the current file from the watch list
         if ( attached_file_ ) {
@@ -99,7 +105,7 @@ void FileHolder::open( const QString& fileName )
     ScopedRecursiveLock locker( file_mutex_ );
     file_name_ = fileName;
 
-    LOG_DEBUG << "open file " << file_name_ << " keep closed " << keep_closed_;
+    LOG_INFO << "open file " << file_name_ << " keep closed " << keep_closed_;
 
     if ( !keep_closed_ ) {
         counter_ = 1;
@@ -122,7 +128,7 @@ void FileHolder::attachReader()
     ScopedRecursiveLock locker( file_mutex_ );
 
     if ( keep_closed_ && counter_ == 0 ) {
-        LOG_DEBUG << "fist reader opened for " << file_name_;
+        LOG_INFO << "fist reader opened for " << file_name_;
         reOpenFile();
     }
 
@@ -140,7 +146,7 @@ void FileHolder::detachReader()
 
     if ( keep_closed_ && counter_ == 0 ) {
         attached_file_->close();
-        LOG_DEBUG << "last reader closed for " << file_name_;
+        LOG_INFO << "last reader closed for " << file_name_;
     }
 }
 

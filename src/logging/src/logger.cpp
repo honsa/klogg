@@ -21,7 +21,6 @@
 #include "log.h"
 
 #include <atomic>
-#include <cstdint>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -54,14 +53,16 @@ class Logger {
         if ( !needLogging( type ) ) {
             return;
         }
-        const auto formattedMessage = qPrintable( qFormatLogMessage( type, context, msg ) );
+        
+        const auto formattedMessage = qFormatLogMessage( type, context, msg );
+        const auto messageToPrint = formattedMessage.toUtf8();
 
         ScopedLock lock( mutex_ );
         QTextStream ts( logFile_.get() );
-        ts << formattedMessage << '\n';
+        ts << messageToPrint << '\n';
 
         if ( isConsoleLogEnabled_ ) {
-            std::cout << formattedMessage << std::endl;
+            std::cout << messageToPrint.constData() << std::endl;
         }
     }
 
@@ -72,10 +73,11 @@ class Logger {
             return;
         }
 
-        const auto formattedMessage = qPrintable( qFormatLogMessage( type, context, msg ) );
+        const auto formattedMessage = qFormatLogMessage( type, context, msg );
+        const auto messageToPrint = formattedMessage.toUtf8();
 
         ScopedLock lock( mutex_ );
-        std::cout << formattedMessage << std::endl;
+        std::cout << messageToPrint.constData() << std::endl;
     }
 
     void enableLogging( bool isEnabled, uint8_t logLevel )
@@ -107,11 +109,11 @@ class Logger {
 
             logFile_ = std::make_unique<QFile>( QDir::temp().filePath( logFileName ) );
             if ( !logFile_->open( QIODevice::WriteOnly | QIODevice::Append ) ) {
-                logFile_.release();
+                logFile_.reset();
             }
         }
         else if ( !isEnabled && logFile_ ) {
-            logFile_.release();
+            logFile_.reset();
         }
 
         setMessageHandler();
@@ -131,7 +133,7 @@ class Logger {
     }
 
   private:
-    Logger() {}
+    Logger() = default;
 
     void setMessageHandler()
     {

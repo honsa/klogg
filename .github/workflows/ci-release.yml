@@ -2,24 +2,35 @@ name: "Make CI Release"
 
 on:
   workflow_dispatch:
+    inputs:
+      ci-run-id:
+        description: "Run ID of CI workflow"
+        required: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
-    - name: Download artifact
+    - uses: actions/checkout@v3
+    - name: Download artifacts for last successful CI workflow
+      if: ${{ !github.event.inputs.ci-run-id }}
       uses: dawidd6/action-download-artifact@v2
       with:
         workflow: ci-build.yml
         workflow_conclusion: success
-        branch: master
+
+    - name: Download artifacts for CI workflow with provided run id
+      if: ${{ github.event.inputs.ci-run-id }}
+      uses: dawidd6/action-download-artifact@v2
+      with:
+        workflow: ci-build.yml
+        run_id: ${{ github.event.inputs.ci-run-id }}
 
     - name: Initialize version
       run: echo "KLOGG_VERSION=`cat klogg_version/klogg_version.txt`" >> $GITHUB_ENV
 
     - name: Display structure of downloaded files
-      run: ls -R
+      run: ls -R ./packages-*
 
     - name: Setup Sentry CLI
       uses: mathrix-education/setup-sentry-cli@0.1.0
@@ -39,24 +50,62 @@ jobs:
     - name: Upload symbols linux
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-deb-x64/klogg_deb.sym 
-        sentry-cli upload-dif ./packages-rpm-x64/klogg_rpm.sym 
+        xz -d ./packages-bionic/klogg_bionic.debug.xz
+        xz -d ./packages-focal/klogg_focal.debug.xz
+        xz -d ./packages-jammy/klogg_jammy.debug.xz
+        xz -d ./packages-oracle/klogg_oracle.debug.xz
+        xz -d ./packages-appimage/klogg_appimage.debug.xz
+        sentry-cli upload-dif ./packages-bionic/klogg_bionic.debug  ./packages-bionic/klogg_bionic
+        sentry-cli upload-dif ./packages-focal/klogg_focal.debug ./packages-focal/klogg_focal
+        sentry-cli upload-dif ./packages-jammy/klogg_jammy.debug ./packages-jammy/klogg_jammy
+        sentry-cli upload-dif ./packages-oracle/klogg_oracle.debug ./packages-oracle/klogg_oracle
+        sentry-cli upload-dif ./packages-appimage/klogg_appimage.debug  ./packages-appimage/klogg_appimage
 
     - name: Upload symbols mac
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-macos-x64/klogg.app/Contents/MacOS/klogg ./packages-macos-x64/klogg.dSym
+        sentry-cli upload-dif ./packages-macos-qt5/klogg-Qt5.app/Contents/MacOS/klogg ./packages-macos-qt5/klogg-Qt5.dSym
+        sentry-cli upload-dif ./packages-macos-qt6/klogg-Qt6.app/Contents/MacOS/klogg ./packages-macos-qt6/klogg-Qt6.dSym
 
-    - name: Upload symbols win x64
+    - name: Upload symbols win
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-windows-x64/klogg-$KLOGG_VERSION-x64-pdb.zip
+        sentry-cli upload-dif ./packages-windows-x64-qt5/klogg-$KLOGG_VERSION-x64-Qt5-pdb.zip
+        sentry-cli upload-dif ./packages-windows-x86-qt5/klogg-$KLOGG_VERSION-x86-Qt5-pdb.zip 
+        sentry-cli upload-dif ./packages-windows-x64-qt6/klogg-$KLOGG_VERSION-x64-Qt6-pdb.zip
 
-    - name: Upload symbols win x86
+    - name: Cleanup release artifacts
       shell: sh
       run: |
-        sentry-cli upload-dif ./packages-windows-x86/klogg-$KLOGG_VERSION-x86-pdb.zip 
+        rm -rf ./packages-bionic/klogg_bionic
+        rm -rf ./packages-focal/klogg_focal
+        rm -rf ./packages-jammy/klogg_jammy
+        rm -rf ./packages-oracle/klogg_oracle
+        rm -rf ./packages-appimage/klogg_appimage
+        rm -rf ./packages-macos-qt5/klogg-Qt5.app
+        rm -rf ./packages-macos-qt6/klogg-Qt6.app
+        mkdir ./linux-debug
+        mv ./packages-bionic/klogg_bionic.debug ./linux-debug
+        mv ./packages-focal/klogg_focal.debug ./linux-debug
+        mv ./packages-jammy/klogg_jammy.debug ./linux-debug
+        mv ./packages-oracle/klogg_oracle.debug ./linux-debug
+        mv ./packages-appimage/klogg_appimage.debug ./linux-debug
+        tar -cJf ./linux-debug/klogg-$KLOGG_VERSION-symbols.tar.xz ./linux-debug/*
+        rm ./linux-debug/*.debug
 
+    - name: Prepare binary artifacts
+      shell: sh
+      run: |
+        mkdir ./packages-bin
+        mv ./packages-appimage/klogg_deps.tar.xz ./packages-bin/klogg-$KLOGG_VERSION-deps.tar.xz
+        ar p  ./packages-focal/klogg-$KLOGG_VERSION-focal.deb data.tar.gz > ./packages-bin/klogg-$KLOGG_VERSION-bin.tar.gz
+        mv ./klogg_version/klogg_version.txt ./packages-bin
+
+    - name: Prepare checksums
+      shell: sh
+      run: |
+        sha256sum --binary ./packages-bin/* ./packages-bionic/* ./packages-focal/* ./packages-jammy/* ./packages-oracle/* ./packages-appimage/*  > ./packages-bin/klogg-$KLOGG_VERSION-sha256.txt
+        
     - name: Release win
       uses: "marvinpinto/action-automatic-releases@latest"
       with:
@@ -64,8 +113,9 @@ jobs:
         automatic_release_tag: continuous-win
         prerelease: true
         files: |
-          ./packages-windows-x64/*
-          ./packages-windows-x86/*
+          ./packages-windows-x64-qt5/*
+          ./packages-windows-x86-qt5/*
+          ./packages-windows-x64-qt6/*
 
     - name: Release linux
       uses: "marvinpinto/action-automatic-releases@latest"
@@ -74,8 +124,13 @@ jobs:
         automatic_release_tag: continuous-linux
         prerelease: true
         files: |
-          ./packages-deb-x64/*
-          ./packages-rpm-x64/*
+          ./packages-bionic/*
+          ./packages-focal/*
+          ./packages-jammy/*
+          ./packages-oracle/*
+          ./packages-appimage/*
+          ./packages-bin/*
+          ./linux-debug/*
 
     - name: Release mac
       uses: "marvinpinto/action-automatic-releases@latest"
@@ -83,7 +138,9 @@ jobs:
         repo_token: ${{ secrets.KLOGG_GITHUB_TOKEN }}
         automatic_release_tag: continuous-osx
         prerelease: true
-        files: ./packages-macos-x64/*
+        files: |
+          ./packages-macos-qt5/*
+          ./packages-macos-qt6/*
 
     - name: Discord notification
       env:

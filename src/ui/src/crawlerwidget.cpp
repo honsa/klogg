@@ -41,19 +41,18 @@
 // the UI elements.  It implements the connection between the UI elements.
 // It also interacts with the sets of data (full and filtered).
 
+#include "abstractlogview.h"
+#include "active_screen.h"
+#include "linetypes.h"
 #include "log.h"
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
-#include <iterator>
 
 #include <QAction>
 #include <QApplication>
 #include <QCompleter>
-#include <QFile>
-#include <QFileInfo>
-#include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonDocument>
 #include <QKeySequence>
@@ -63,6 +62,7 @@
 #include <QStandardItemModel>
 #include <QStringListModel>
 #include <qglobal.h>
+#include <qobject.h>
 #include <string>
 
 #include "regularexpression.h"
@@ -73,13 +73,11 @@
 #include "dispatch_to.h"
 #include "fontutils.h"
 #include "infoline.h"
-#include "overview.h"
 #include "quickfindpattern.h"
-#include "quickfindwidget.h"
 #include "savedsearches.h"
 #include "shortcuts.h"
 
-static constexpr char AnsiColorSequenceRegex[] = "\\x1B\\[([0-9]{1,2}(;[0-9]{1,2})?)?[mK]";
+static constexpr char AnsiColorSequenceRegex[] = "\\x1B\\[([0-9]{1,4}((;|:)[0-9]{1,3})*)?[mK]";
 
 // Palette for error signaling (yellow background)
 const QPalette CrawlerWidget::ErrorPalette( Qt::darkYellow );
@@ -178,9 +176,9 @@ LineNumber CrawlerWidget::getTopLine() const
 QString CrawlerWidget::getSelectedText() const
 {
     if ( filteredView_->hasFocus() )
-        return filteredView_->getSelection();
+        return filteredView_->getSelectedText();
     else
-        return logMainView_->getSelection();
+        return logMainView_->getSelectedText();
 }
 
 bool CrawlerWidget::isPartialSelection() const
@@ -204,6 +202,11 @@ std::optional<int> CrawlerWidget::encodingMib() const
 bool CrawlerWidget::isFollowEnabled() const
 {
     return logMainView_->isFollowEnabled();
+}
+
+bool CrawlerWidget::isTextWrapEnabled() const
+{
+    return logMainView_->isTextWrapEnabled();
 }
 
 void CrawlerWidget::reloadPredefinedFilters() const
@@ -233,9 +236,9 @@ std::vector<QObject*> CrawlerWidget::doGetAllSearchables() const
 // Update the state of the parent
 void CrawlerWidget::doSendAllStateSignals()
 {
-    emit updateLineNumber( currentLineNumber_ );
+    Q_EMIT newSelection( currentLineNumber_, 0_lcount, 0_lcol, 0_length );
     if ( !loadingInProgress_ )
-        emit loadingFinished( LoadingStatus::Successful );
+        Q_EMIT loadingFinished( LoadingStatus::Successful );
 }
 
 void CrawlerWidget::changeEvent( QEvent* event )
@@ -251,7 +254,7 @@ void CrawlerWidget::changeEvent( QEvent* event )
 }
 
 //
-// Public slots
+// Public Q_SLOTS:
 //
 
 void CrawlerWidget::stopLoading()
@@ -313,13 +316,13 @@ void CrawlerWidget::goToLine()
 void CrawlerWidget::doSetData( std::shared_ptr<LogData> logData,
                                std::shared_ptr<LogFilteredData> filteredData )
 {
-    logData_ = logData;
-    logFilteredData_ = filteredData;
+    logData_ = std::move( logData );
+    logFilteredData_ = std::move( filteredData );
 }
 
 void CrawlerWidget::doSetQuickFindPattern( std::shared_ptr<QuickFindPattern> qfp )
 {
-    quickFindPattern_ = qfp;
+    quickFindPattern_ = std::move( qfp );
 }
 
 void CrawlerWidget::doSetSavedSearches( SavedSearches* saved_searches )
@@ -366,14 +369,39 @@ std::shared_ptr<const ViewContextInterface> CrawlerWidget::doGetViewContext() co
 }
 
 //
-// Slots
+// Q_SLOTS:
 //
 
 void CrawlerWidget::startNewSearch()
 {
+    if ( keepSearchResultsButton_->isChecked() ) {
+        keepSearchResultsButton_->setChecked( false );
+
+        logFilteredData_->interruptSearch();
+        logFilteredData_ = logData_->getNewFilteredData();
+
+        filteredView_ = new FilteredView( logFilteredData_.get(), quickFindPattern_.get() );
+        filteredViewsData_[ filteredView_ ] = logFilteredData_;
+
+        connectAllFilteredViewSlots( filteredView_ );
+
+        auto index = tabbedFilteredView_->addTab( filteredView_, "" );
+        tabbedFilteredView_->setCurrentIndex( index );
+
+        connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
+                 &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
+
+        logMainView_->useNewFiltering( logFilteredData_.get() );
+
+        applyConfiguration();
+    }
+
+    tabbedFilteredView_->setTabText( tabbedFilteredView_->currentIndex(),
+                                     "Find \"" + searchLineEdit_->currentText() + "\"" );
+
     // Record the search line in the recent list
     // (reload the list first in case another glogg changed it)
-    auto& searches = SavedSearches::getSynced();
+    const auto& searches = SavedSearches::getSynced();
     savedSearches_->addRecent( searchLineEdit_->currentText() );
     searches.save();
 
@@ -381,6 +409,12 @@ void CrawlerWidget::startNewSearch()
     updateSearchCombo();
     // Call the private function to do the search
     replaceCurrentSearch( searchLineEdit_->currentText() );
+}
+
+void CrawlerWidget::updatePredefinedFiltersWidget()
+{
+    predefinedFilters_->updateSearchPattern( searchLineEdit_->currentText(),
+                                             booleanButton_->isChecked() );
 }
 
 void CrawlerWidget::stopSearch()
@@ -434,13 +468,13 @@ void CrawlerWidget::saveAsPredefinedFilter()
 {
     const auto currentText = searchLineEdit_->currentText();
 
-    emit saveCurrentSearchAsPredefinedFilter( currentText );
+    Q_EMIT saveCurrentSearchAsPredefinedFilter( currentText );
 }
 
 void CrawlerWidget::showSearchContextMenu()
 {
     if ( searchLineContextMenu_ )
-        searchLineContextMenu_->exec( QCursor::pos() );
+        searchLineContextMenu_->exec( QCursor::pos( activeScreen( this ) ) );
 }
 
 // When receiving the 'newDataAvailable' signal from LogFilteredData
@@ -459,15 +493,20 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
         stopButton_->setEnabled( false );
         stopButton_->hide();
         searchButton_->show();
+        clearButton_->show();
     }
     else {
         // Search in progress
         // We ignore 0% and 100% to avoid a flash when the search is very short
         if ( progress > 0 ) {
+            // Some languages translate the plural the same as the singular, so use the full string
+
             searchInfoLine_->setText(
-                tr( "Search in progress (%1 %)... %2 match%3 found so far." )
-                    .arg( QString::number( progress ), QString::number( nbMatches.get() ),
-                          QLatin1String( nbMatches.get() > 1 ? "es" : "" ) ) );
+                tr( "Search in progress (%1 %)..." ).arg( QString::number( progress ) )
+                + ( nbMatches.get() > 1 ? tr( " %1 matches found so far." )
+                                              .arg( QString::number( nbMatches.get() ) )
+                                        : tr( " %1 match found so far." )
+                                              .arg( QString::number( nbMatches.get() ) ) ) );
 
             searchInfoLine_->displayGauge( progress );
         }
@@ -505,26 +544,29 @@ void CrawlerWidget::updateFilteredView( LinesCount nbMatches, int progress,
     }
 }
 
-void CrawlerWidget::jumpToMatchingLine( LineNumber filteredLineNb )
+void CrawlerWidget::jumpToMatchingLine( LineNumber filteredLineNb, LinesCount nLines,
+                                        LineColumn startCol, LineLength nSymbols )
 {
     const auto mainViewLine = logFilteredData_->getMatchingLineNumber( filteredLineNb );
-    logMainView_->selectAndDisplayLine( mainViewLine ); // FIXME: should be done with a signal.
+    logMainView_->selectPortionAndDisplayLine( mainViewLine, nLines, startCol,
+                                               nSymbols ); // FIXME: should be done with a signal.
 }
 
-void CrawlerWidget::updateLineNumberHandler( LineNumber line )
+void CrawlerWidget::updateLineNumberHandler( LineNumber line, LinesCount nLines,
+                                             LineColumn startCol, LineLength nSymbols )
 {
     currentLineNumber_ = line;
-    emit updateLineNumber( line );
+    Q_EMIT newSelection( line, nLines, startCol, nSymbols );
 }
 
-void CrawlerWidget::markLinesFromMain( const std::vector<LineNumber>& lines )
+void CrawlerWidget::markLinesFromMain( const klogg::vector<LineNumber>& lines )
 {
-    std::vector<LineNumber> alreadyMarkedLines;
+    klogg::vector<LineNumber> alreadyMarkedLines;
     alreadyMarkedLines.reserve( lines.size() );
 
     bool markAdded = false;
     for ( const auto& line : lines ) {
-        if ( line > logData_->getNbLine() ) {
+        if ( line >= logData_->getNbLine() ) {
             continue;
         }
 
@@ -555,9 +597,9 @@ void CrawlerWidget::markLinesFromMain( const std::vector<LineNumber>& lines )
     update();
 }
 
-void CrawlerWidget::markLinesFromFiltered( const std::vector<LineNumber>& lines )
+void CrawlerWidget::markLinesFromFiltered( const klogg::vector<LineNumber>& lines )
 {
-    std::vector<LineNumber> linesInMain( lines.size() );
+    klogg::vector<LineNumber> linesInMain( lines.size() );
     std::transform( lines.cbegin(), lines.cend(), linesInMain.begin(),
                     [ this ]( const auto& filteredLine ) {
                         if ( filteredLine < logData_->getNbLine() ) {
@@ -597,17 +639,19 @@ void CrawlerWidget::applyConfiguration()
     }
 
     logMainView_->setLineNumbersVisible( config.mainLineNumbersVisible() );
-    filteredView_->setLineNumbersVisible( config.filteredLineNumbersVisible() );
 
     const auto isFollowModeAllowed = config.anyFileWatchEnabled();
     logMainView_->allowFollowMode( isFollowModeAllowed );
-    filteredView_->allowFollowMode( isFollowModeAllowed );
-
     overview_.setVisible( config.isOverviewVisible() );
     logMainView_->refreshOverview();
-
     logMainView_->updateFont( font );
-    filteredView_->updateFont( font );
+
+    for ( auto i = 0; i < tabbedFilteredView_->count(); ++i ) {
+        auto fv = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( i ) );
+        fv->setLineNumbersVisible( config.filteredLineNumbersVisible() );
+        fv->allowFollowMode( isFollowModeAllowed );
+        fv->updateFont( font );
+    }
 
     // Update the SearchLine (history)
     updateSearchCombo();
@@ -685,7 +729,7 @@ void CrawlerWidget::loadingFinishedHandler( LoadingStatus status )
     }
 
     loadingInProgress_ = false;
-    emit loadingFinished( status );
+    Q_EMIT loadingFinished( status );
 }
 
 void CrawlerWidget::fileChangedHandler( MonitoredFileStatus status )
@@ -777,6 +821,7 @@ void CrawlerWidget::useRegexpChangeHandler( bool )
 void CrawlerWidget::searchTextChangeHandler( QString )
 {
     resetStateOnSearchPatternChanges();
+    updatePredefinedFiltersWidget();
 }
 
 void CrawlerWidget::changeFilteredViewVisibility( int index )
@@ -866,6 +911,7 @@ void CrawlerWidget::replaceSearch( const QString& searchString )
 void CrawlerWidget::setSearchPattern( const QString& searchPattern )
 {
     searchLineEdit_->setEditText( searchPattern );
+    updatePredefinedFiltersWidget();
     // Set the focus to lineEdit so that the user can press 'Return' immediately
     searchLineEdit_->lineEdit()->setFocus();
 
@@ -908,6 +954,7 @@ void CrawlerWidget::clearSearchLimits()
 // the data are attached.
 void CrawlerWidget::setup()
 {
+    LOG_INFO << "Setup crawler widget";
     setOrientation( Qt::Vertical );
 
     assert( logData_ );
@@ -923,6 +970,7 @@ void CrawlerWidget::setup()
     logMainView_->setContentsMargins( 2, 0, 2, 0 );
 
     filteredView_ = new FilteredView( logFilteredData_.get(), quickFindPattern_.get() );
+    filteredViewsData_[ filteredView_ ] = logFilteredData_;
     filteredView_->setContentsMargins( 2, 0, 2, 0 );
 
     overviewWidget_->setOverview( &overview_ );
@@ -984,7 +1032,7 @@ void CrawlerWidget::setup()
     // Construct the Search Info line
     searchInfoLine_ = new InfoLine();
     searchInfoLine_->setFrameStyle( QFrame::StyledPanel );
-    searchInfoLine_->setFrameShadow( QFrame::Sunken);
+    searchInfoLine_->setFrameShadow( QFrame::Sunken );
     searchInfoLine_->setLineWidth( 1 );
     searchInfoLine_->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Minimum );
     auto searchInfoLineSizePolicy = searchInfoLine_->sizePolicy();
@@ -994,31 +1042,31 @@ void CrawlerWidget::setup()
     searchInfoLine_->setContentsMargins( 2, 2, 2, 2 );
 
     matchCaseButton_ = new QToolButton();
-    matchCaseButton_->setToolTip( "Match case" );
+    matchCaseButton_->setToolTip( tr( "Match case" ) );
     matchCaseButton_->setCheckable( true );
     matchCaseButton_->setFocusPolicy( Qt::NoFocus );
     matchCaseButton_->setContentsMargins( 2, 2, 2, 2 );
 
     useRegexpButton_ = new QToolButton();
-    useRegexpButton_->setToolTip( "Use regex" );
+    useRegexpButton_->setToolTip( tr( "Use regex" ) );
     useRegexpButton_->setCheckable( true );
     useRegexpButton_->setFocusPolicy( Qt::NoFocus );
     useRegexpButton_->setContentsMargins( 2, 2, 2, 2 );
 
     inverseButton_ = new QToolButton();
-    inverseButton_->setToolTip( "Inverse match" );
+    inverseButton_->setToolTip( tr( "Inverse match" ) );
     inverseButton_->setCheckable( true );
     inverseButton_->setFocusPolicy( Qt::NoFocus );
     inverseButton_->setContentsMargins( 2, 2, 2, 2 );
 
     booleanButton_ = new QToolButton();
-    booleanButton_->setToolTip( "Enable regular expression logical combining" );
+    booleanButton_->setToolTip( tr( "Enable regular expression logical combining" ) );
     booleanButton_->setCheckable( true );
     booleanButton_->setFocusPolicy( Qt::NoFocus );
     booleanButton_->setContentsMargins( 2, 2, 2, 2 );
 
     searchRefreshButton_ = new QToolButton();
-    searchRefreshButton_->setToolTip( "Auto-refresh" );
+    searchRefreshButton_->setToolTip( tr( "Auto-refresh" ) );
     searchRefreshButton_->setCheckable( true );
     searchRefreshButton_->setFocusPolicy( Qt::NoFocus );
     searchRefreshButton_->setContentsMargins( 2, 2, 2, 2 );
@@ -1034,9 +1082,9 @@ void CrawlerWidget::setup()
     searchLineEdit_->lineEdit()->setMaxLength( std::numeric_limits<int>::max() / 1024 );
     searchLineEdit_->setContentsMargins( 2, 2, 2, 2 );
 
-    QAction* clearSearchHistoryAction = new QAction( "Clear search history", this );
-    QAction* editSearchHistoryAction = new QAction( "Edit search history", this );
-    QAction* saveAsPredefinedFilterAction = new QAction( "Save as Filter", this );
+    QAction* clearSearchHistoryAction = new QAction( tr( "Clear search history" ), this );
+    QAction* editSearchHistoryAction = new QAction( tr( "Edit search history" ), this );
+    QAction* saveAsPredefinedFilterAction = new QAction( tr( "Save as Filter" ), this );
 
     searchLineContextMenu_ = searchLineEdit_->lineEdit()->createStandardContextMenu();
     searchLineContextMenu_->addSeparator();
@@ -1048,10 +1096,22 @@ void CrawlerWidget::setup()
 
     setFocusProxy( searchLineEdit_ );
 
+    clearButton_ = new QToolButton();
+    clearButton_->setText( tr( "Clear search text" ) );
+    clearButton_->setAutoRaise( true );
+    clearButton_->setContentsMargins( 2, 2, 2, 2 );
+
     searchButton_ = new QToolButton();
     searchButton_->setText( tr( "Search" ) );
     searchButton_->setAutoRaise( true );
     searchButton_->setContentsMargins( 2, 2, 2, 2 );
+
+    keepSearchResultsButton_ = new QToolButton();
+    keepSearchResultsButton_->setText( tr( "Keep Results" ) );
+    keepSearchResultsButton_->setToolTip(
+        tr( "Keep these results and show subsequent results in a new window" ) );
+    keepSearchResultsButton_->setCheckable( true );
+    keepSearchResultsButton_->setContentsMargins( 2, 2, 2, 2 );
 
     stopButton_ = new QToolButton();
     stopButton_->setAutoRaise( true );
@@ -1072,14 +1132,22 @@ void CrawlerWidget::setup()
     searchLineLayout->addWidget( searchRefreshButton_ );
     searchLineLayout->addWidget( predefinedFilters_ );
     searchLineLayout->addWidget( searchLineEdit_ );
+    searchLineLayout->addWidget( clearButton_ );
     searchLineLayout->addWidget( searchButton_ );
+    searchLineLayout->addWidget( keepSearchResultsButton_ );
     searchLineLayout->addWidget( stopButton_ );
     searchLineLayout->addWidget( searchInfoLine_ );
 
     // Construct the bottom window
+    tabbedFilteredView_ = new QTabWidget;
+    tabbedFilteredView_->setTabsClosable( true );
+    tabbedFilteredView_->addTab( filteredView_, "" );
+    tabbedFilteredView_->setDocumentMode( true );
+    tabbedFilteredView_->setTabBarAutoHide( true );
+
     auto* bottomMainLayout = new QVBoxLayout;
     bottomMainLayout->addLayout( searchLineLayout );
-    bottomMainLayout->addWidget( filteredView_ );
+    bottomMainLayout->addWidget( tabbedFilteredView_ );
     bottomMainLayout->setContentsMargins( 2, 2, 2, 2 );
     bottomWindow->setLayout( bottomMainLayout );
 
@@ -1089,7 +1157,7 @@ void CrawlerWidget::setup()
     // Default search checkboxes
     auto& config = Configuration::get();
     searchRefreshButton_->setChecked( config.isSearchAutoRefreshDefault() );
-    matchCaseButton_->setChecked( config.isSearchIgnoreCaseDefault() ? false : true );
+    matchCaseButton_->setChecked( !config.isSearchIgnoreCaseDefault() );
     useRegexpButton_->setChecked( config.mainRegexpType() == SearchRegexpType::ExtendedRegexp );
 
     // Manually call the handler as it is not called when changing the state programmatically
@@ -1110,6 +1178,9 @@ void CrawlerWidget::setup()
     connect( searchLineEdit_->lineEdit(), &QLineEdit::textEdited, this,
              &CrawlerWidget::searchTextChangeHandler );
 
+    connect( searchLineEdit_, QOverload<int>::of( &QComboBox::currentIndexChanged ), this,
+             [ this ]( auto ) { updatePredefinedFiltersWidget(); } );
+
     connect( predefinedFilters_, &PredefinedFiltersComboBox::filterChanged, this,
              &CrawlerWidget::setSearchPatternFromPredefinedFilters );
 
@@ -1123,101 +1194,57 @@ void CrawlerWidget::setup()
              &CrawlerWidget::editSearchHistory );
     connect( searchButton_, &QToolButton::clicked, this, &CrawlerWidget::startNewSearch );
     connect( stopButton_, &QToolButton::clicked, this, &CrawlerWidget::stopSearch );
+    connect( clearButton_, &QToolButton::clicked, searchLineEdit_, &QComboBox::clearEditText );
 
     connect( visibilityBox_, QOverload<int>::of( &QComboBox::currentIndexChanged ), this,
              &CrawlerWidget::changeFilteredViewVisibility );
 
     connect( logMainView_, &LogMainView::newSelection,
              [ this ]( auto ) { logMainView_->update(); } );
-    connect( filteredView_, &FilteredView::newSelection,
-             [ this ]( auto ) { filteredView_->update(); } );
 
-    connect( filteredView_, &FilteredView::newSelection, this, &CrawlerWidget::jumpToMatchingLine );
-
-    connect( logMainView_, &LogMainView::updateLineNumber, this,
+    connect( logMainView_, &LogMainView::newSelection, this,
              &CrawlerWidget::updateLineNumberHandler );
 
     connect( logMainView_, &LogMainView::markLines, this, &CrawlerWidget::markLinesFromMain );
-    connect( filteredView_, &FilteredView::markLines, this, &CrawlerWidget::markLinesFromFiltered );
+
+    connect( logMainView_, &LogMainView::highlightersChange, this,
+             &CrawlerWidget::applyConfiguration );
 
     connect( logMainView_, QOverload<const QString&>::of( &LogMainView::addToSearch ), this,
-             &CrawlerWidget::addToSearch );
-    connect( filteredView_, QOverload<const QString&>::of( &FilteredView::addToSearch ), this,
              &CrawlerWidget::addToSearch );
 
     connect( logMainView_, QOverload<const QString&>::of( &LogMainView::excludeFromSearch ), this,
              &CrawlerWidget::excludeFromSearch );
-    connect( filteredView_, QOverload<const QString&>::of( &FilteredView::excludeFromSearch ), this,
-             &CrawlerWidget::excludeFromSearch );
 
     connect( logMainView_, QOverload<const QString&>::of( &LogMainView::replaceSearch ), this,
              &CrawlerWidget::replaceSearch );
-    connect( filteredView_, QOverload<const QString&>::of( &FilteredView::replaceSearch ), this,
-             &CrawlerWidget::replaceSearch );
-
-    connect( filteredView_, &FilteredView::mouseHoveredOverLine, this,
-             &CrawlerWidget::mouseHoveredOverMatch );
-    connect( filteredView_, &FilteredView::mouseLeftHoveringZone, overviewWidget_,
-             &OverviewWidget::removeHighlight );
 
     // Follow option (up and down)
     connect( this, &CrawlerWidget::followSet, logMainView_, &LogMainView::followSet );
-    connect( this, &CrawlerWidget::followSet, filteredView_, &FilteredView::followSet );
     connect( logMainView_, &LogMainView::followModeChanged, this,
              &CrawlerWidget::followModeChanged );
-    connect( filteredView_, &FilteredView::followModeChanged, this,
-             &CrawlerWidget::followModeChanged );
+
+    connect( this, &CrawlerWidget::textWrapSet, logMainView_, &LogMainView::textWrapSet );
 
     // Detect activity in the views
     connect( logMainView_, &LogMainView::activity, this, &CrawlerWidget::activityDetected );
-    connect( filteredView_, &FilteredView::activity, this, &CrawlerWidget::activityDetected );
 
     connect( logMainView_, &LogMainView::changeSearchLimits, this,
-             &CrawlerWidget::setSearchLimits );
-    connect( filteredView_, &FilteredView::changeSearchLimits, this,
              &CrawlerWidget::setSearchLimits );
 
     connect( logMainView_, &LogMainView::clearSearchLimits, this,
              &CrawlerWidget::clearSearchLimits );
-    connect( filteredView_, &FilteredView::clearSearchLimits, this,
-             &CrawlerWidget::clearSearchLimits );
 
-    auto saveSplitterSizes = [ this ]() {
-        LOG_INFO << "Saving default splitter size";
-        auto& splitterConfig = Configuration::get();
-        splitterConfig.setSplitterSizes( this->sizes() );
-        splitterConfig.save();
-    };
+    connect( tabbedFilteredView_, &QTabWidget::currentChanged, this,
+             &CrawlerWidget::changeFilteredView );
 
-    connect( logMainView_, &LogMainView::saveDefaultSplitterSizes, this, saveSplitterSizes );
-    connect( filteredView_, &FilteredView::saveDefaultSplitterSizes, this, saveSplitterSizes );
+    connect( tabbedFilteredView_, &QTabWidget::tabCloseRequested, this,
+             &CrawlerWidget::closeFilteredView );
 
-    auto changeFontSize = [ this ]( bool increase ) {
-        auto& fontConfig = Configuration::get();
+    connect( logMainView_, &LogMainView::saveDefaultSplitterSizes, this,
+             &CrawlerWidget::saveSplitterSizes );
 
-        QFontInfo fontInfo = QFontInfo( fontConfig.mainFont() );
-        const auto availableSizes = FontUtils::availableFontSizes( fontInfo.family() );
-
-        auto currentSize
-            = std::find( availableSizes.cbegin(), availableSizes.cend(), fontInfo.pointSize() );
-        if ( increase && currentSize != std::prev( availableSizes.cend() ) ) {
-            currentSize = std::next( currentSize );
-        }
-        else if ( !increase && currentSize != availableSizes.begin() ) {
-            currentSize = std::prev( currentSize );
-        }
-
-        if ( currentSize != availableSizes.cend() ) {
-            QFont newFont{ fontInfo.family(), *currentSize };
-
-            fontConfig.setMainFont( newFont );
-            logMainView_->updateFont( newFont );
-            filteredView_->updateFont( newFont );
-        }
-    };
-
-    connect( logMainView_, &LogMainView::changeFontSize, this, changeFontSize );
-    connect( filteredView_, &FilteredView::changeFontSize, this, changeFontSize );
+    connect( logMainView_, &LogMainView::changeFontSize, this, &CrawlerWidget::changeFontSize );
 
     connect( logFilteredData_.get(), &LogFilteredData::searchProgressed, this,
              &CrawlerWidget::updateFilteredView, Qt::QueuedConnection );
@@ -1248,24 +1275,153 @@ void CrawlerWidget::setup()
     connect( matchCaseButton_, &QPushButton::toggled, this, &CrawlerWidget::matchCaseChanged );
 
     // Switch between views
-    connect( logMainView_, &LogMainView::exitView, filteredView_,
-             QOverload<>::of( &FilteredView::setFocus ) );
-    connect( filteredView_, &FilteredView::exitView, logMainView_,
-             QOverload<>::of( &LogMainView::setFocus ) );
-
     connect( logMainView_, &AbstractLogView::clearColorLabels, this,
-             &CrawlerWidget::clearColorLabels );
-    connect( filteredView_, &AbstractLogView::clearColorLabels, this,
              &CrawlerWidget::clearColorLabels );
 
     connect( logMainView_, &AbstractLogView::addColorLabel, this,
              &CrawlerWidget::addColorLabelToSelection );
-    connect( filteredView_, &AbstractLogView::addColorLabel, this,
+
+    connect( logMainView_, &AbstractLogView::sendSelectionToScratchpad, this,
+             [ this ]() { Q_EMIT sendToScratchpad( logMainView_->getSelectedText() ); } );
+
+    connect( logMainView_, &AbstractLogView::replaceScratchpadWithSelection, this,
+             [ this ]() { Q_EMIT replaceDataInScratchpad( logMainView_->getSelectedText() ); } );
+
+    connectAllFilteredViewSlots( filteredView_ );
+
+    const auto defaultEncodingMib = config.defaultEncodingMib();
+    if ( defaultEncodingMib >= 0 ) {
+        encodingMib_ = defaultEncodingMib;
+    }
+    updatePredefinedFiltersWidget();
+}
+
+void CrawlerWidget::changeFilteredView( int tabIndex )
+{
+    logFilteredData_->interruptSearch();
+    if ( tabIndex >= 0 ) {
+        auto* tabFilteredView
+            = qobject_cast<FilteredView*>( tabbedFilteredView_->widget( tabIndex ) );
+
+        filteredView_ = tabFilteredView;
+        logFilteredData_ = filteredViewsData_.at( tabFilteredView );
+
+        Q_EMIT filteredViewChanged();
+
+        logMainView_->useNewFiltering( logFilteredData_.get() );
+        changeFilteredViewVisibility( visibilityBox_->currentIndex() );
+    }
+}
+
+void CrawlerWidget::closeFilteredView( int tabIndex )
+{
+    auto* tabFilteredView = tabbedFilteredView_->widget( tabIndex );
+    connect( tabFilteredView, &QObject::destroyed, this, &CrawlerWidget::filteredViewDestroyed );
+    tabFilteredView->deleteLater();
+}
+
+void CrawlerWidget::filteredViewDestroyed( QObject* view )
+{
+    filteredViewsData_.erase( qobject_cast<FilteredView*>( view ) );
+}
+
+void CrawlerWidget::saveSplitterSizes() const
+{
+    LOG_INFO << "Saving default splitter size";
+    auto& splitterConfig = Configuration::get();
+    splitterConfig.setSplitterSizes( sizes() );
+    splitterConfig.save();
+}
+
+void CrawlerWidget::changeFontSize( bool increase )
+{
+    auto& fontConfig = Configuration::get();
+
+    auto fontInfo = QFontInfo( fontConfig.mainFont() );
+    const auto availableSizes = FontUtils::availableFontSizes( fontInfo.family() );
+
+    auto currentSize
+        = std::find( availableSizes.cbegin(), availableSizes.cend(), fontInfo.pointSize() );
+    if ( increase && currentSize != std::prev( availableSizes.cend() ) ) {
+        currentSize = std::next( currentSize );
+    }
+    else if ( !increase && currentSize != availableSizes.begin() ) {
+        currentSize = std::prev( currentSize );
+    }
+
+    if ( currentSize != availableSizes.cend() ) {
+        QFont newFont{ fontInfo.family(), *currentSize };
+
+        fontConfig.setMainFont( newFont );
+        logMainView_->updateFont( newFont );
+        filteredView_->updateFont( newFont );
+    }
+}
+
+void CrawlerWidget::connectAllFilteredViewSlots( FilteredView* view )
+{
+    connect( view, &FilteredView::newSelection, view, [ view ]( auto ) { view->update(); } );
+
+    connect( view, &FilteredView::newSelection, this, &CrawlerWidget::jumpToMatchingLine );
+
+    connect( view, &FilteredView::markLines, this, &CrawlerWidget::markLinesFromFiltered );
+
+    connect( view, &FilteredView::highlightersChange, this, &CrawlerWidget::applyConfiguration );
+
+    connect( view, QOverload<const QString&>::of( &FilteredView::addToSearch ), this,
+             &CrawlerWidget::addToSearch );
+
+    connect( view, QOverload<const QString&>::of( &FilteredView::excludeFromSearch ), this,
+             &CrawlerWidget::excludeFromSearch );
+
+    connect( view, QOverload<const QString&>::of( &FilteredView::replaceSearch ), this,
+             &CrawlerWidget::replaceSearch );
+
+    connect( view, &FilteredView::mouseHoveredOverLine, this,
+             &CrawlerWidget::mouseHoveredOverMatch );
+
+    connect( view, &FilteredView::mouseLeftHoveringZone, overviewWidget_,
+             &OverviewWidget::removeHighlight );
+
+    connect( this, &CrawlerWidget::followSet, view, &FilteredView::followSet );
+
+    connect( view, &FilteredView::followModeChanged, this, &CrawlerWidget::followModeChanged );
+
+    connect( this, &CrawlerWidget::textWrapSet, view, &FilteredView::textWrapSet );
+
+    connect( view, &FilteredView::activity, this, &CrawlerWidget::activityDetected );
+
+    connect( view, &FilteredView::changeSearchLimits, this, &CrawlerWidget::setSearchLimits );
+
+    connect( view, &FilteredView::saveDefaultSplitterSizes, this,
+             &CrawlerWidget::saveSplitterSizes );
+
+    connect( view, &FilteredView::changeFontSize, this, &CrawlerWidget::changeFontSize );
+
+    connect( view, &FilteredView::clearSearchLimits, this, &CrawlerWidget::clearSearchLimits );
+
+    connect( view, &AbstractLogView::addColorLabel, this,
              &CrawlerWidget::addColorLabelToSelection );
+
+    connect( view, &AbstractLogView::sendSelectionToScratchpad, this,
+             [ view, this ]() { Q_EMIT sendToScratchpad( view->getSelectedText() ); } );
+
+    connect( view, &AbstractLogView::replaceScratchpadWithSelection, this,
+             [ view, this ]() { Q_EMIT replaceDataInScratchpad( view->getSelectedText() ); } );
+
+    connect( view, &FilteredView::exitView, logMainView_,
+             QOverload<>::of( &LogMainView::setFocus ) );
+
+    connect( view, &AbstractLogView::clearColorLabels, this, &CrawlerWidget::clearColorLabels );
+
+    connect( logMainView_, &LogMainView::exitView, view,
+             QOverload<>::of( &FilteredView::setFocus ) );
 }
 
 void CrawlerWidget::registerShortcuts()
 {
+    LOG_INFO << "registering shortcuts for crawler widget";
+
     for ( auto& shortcut : shortcuts_ ) {
         shortcut.second->deleteLater();
     }
@@ -1277,10 +1433,44 @@ void CrawlerWidget::registerShortcuts()
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
-        ShortcutAction::CrawlerChangeVisibility, [ this ]() {
+        ShortcutAction::CrawlerChangeVisibilityForward, [ this ]() {
             visibilityBox_->setCurrentIndex( ( visibilityBox_->currentIndex() + 1 )
                                              % visibilityBox_->count() );
         } );
+
+    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
+                                      Qt::WidgetWithChildrenShortcut,
+                                      ShortcutAction::CrawlerChangeVisibilityBackward, [ this ]() {
+                                          int nextIndex = visibilityBox_->currentIndex() - 1;
+                                          if ( nextIndex < 0 ) {
+                                              nextIndex = visibilityBox_->count() - 1;
+                                          }
+                                          visibilityBox_->setCurrentIndex( nextIndex );
+                                      } );
+
+    ShortcutAction::registerShortcut(
+        configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
+        ShortcutAction::CrawlerChangeVisibilityToMarksAndMatches, [ this ]() {
+            if ( visibilityBox_->count() > 0 ) {
+                visibilityBox_->setCurrentIndex( 0 );
+            }
+        } );
+
+    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
+                                      Qt::WidgetWithChildrenShortcut,
+                                      ShortcutAction::CrawlerChangeVisibilityToMarks, [ this ]() {
+                                          if ( visibilityBox_->count() > 1 ) {
+                                              visibilityBox_->setCurrentIndex( 1 );
+                                          }
+                                      } );
+
+    ShortcutAction::registerShortcut( configuredShortcuts, shortcuts_, this,
+                                      Qt::WidgetWithChildrenShortcut,
+                                      ShortcutAction::CrawlerChangeVisibilityToMatches, [ this ]() {
+                                          if ( visibilityBox_->count() > 2 ) {
+                                              visibilityBox_->setCurrentIndex( 2 );
+                                          }
+                                      } );
 
     ShortcutAction::registerShortcut(
         configuredShortcuts, shortcuts_, this, Qt::WidgetWithChildrenShortcut,
@@ -1331,9 +1521,11 @@ void CrawlerWidget::loadIcons()
     useRegexpButton_->setIcon( iconLoader_.load( "regex" ) );
     inverseButton_->setIcon( iconLoader_.load( "icons8-not-equal" ) );
     booleanButton_->setIcon( iconLoader_.load( "icons8-venn-diagram" ) );
+    clearButton_->setIcon( iconLoader_.load( "icons8-delete" ) );
     searchButton_->setIcon( iconLoader_.load( "icons8-search" ) );
+    keepSearchResultsButton_->setIcon( iconLoader_.load( "icons8-lock" ) );
     matchCaseButton_->setIcon( iconLoader_.load( "icons8-font-size" ) );
-    stopButton_->setIcon( iconLoader_.load( "icons8-delete" ) );
+    stopButton_->setIcon( iconLoader_.load( "icons8-close-window" ) );
 }
 
 // Create a new search using the text passed, replace the currently
@@ -1355,6 +1547,12 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 
     nbMatches_ = 0_lcount;
 
+    // Switch to "Marks and matches" view when in "Marks" view
+    using VisibilityFlags = LogFilteredData::VisibilityFlags;
+    if ( !filteredView_->visibility().testFlag( VisibilityFlags::Matches ) ) {
+        visibilityBox_->setCurrentIndex( 0 );
+    }
+
     // Clear and recompute the content of the filtered window.
     logFilteredData_->clearSearch();
     filteredView_->updateData();
@@ -1371,12 +1569,12 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
 
         RegularExpression hsExpression{ regexpPattern };
         auto isValidExpression = hsExpression.isValid();
-        auto errorString = hsExpression.errorString();
 
         if ( isValidExpression ) {
             // Activate the stop button
             stopButton_->setEnabled( true );
             stopButton_->show();
+            clearButton_->hide();
             searchButton_->hide();
             // Start a new asynchronous search
             logFilteredData_->runSearch( regexpPattern, searchStartLine_, searchEndLine_ );
@@ -1393,6 +1591,7 @@ void CrawlerWidget::replaceCurrentSearch( const QString& searchText )
             searchState_.resetState();
 
             // Inform the user
+            QString errorString = hsExpression.errorString();
             QString errorMessage = tr( "Error in expression" );
             // const int offset = regexp.patternErrorOffset();
             // if ( offset != -1 ) {
@@ -1442,9 +1641,9 @@ void CrawlerWidget::printSearchInfoMessage( LinesCount nbMatches )
         break;
     case SearchState::Static:
     case SearchState::Autorefreshing:
-        text = tr( "%1 match%2 found." )
-                   .arg( nbMatches.get() )
-                   .arg( nbMatches.get() > 1 ? "es" : "" );
+        // Some languages translate the plural the same as the singular, so use the full string
+        text = nbMatches.get() > 1 ? tr( "%1 matches found" ).arg( nbMatches.get() )
+                                   : tr( "%1 match found" ).arg( nbMatches.get() );
         break;
     case SearchState::FileTruncated:
     case SearchState::TruncatedAutorefreshing:
@@ -1464,7 +1663,7 @@ void CrawlerWidget::changeDataStatus( DataStatus status )
          && ( !( dataStatus_ == DataStatus::NEW_FILTERED_DATA
                  && status == DataStatus::NEW_DATA ) ) ) {
         dataStatus_ = status;
-        emit dataStatusChanged( dataStatus_ );
+        Q_EMIT dataStatusChanged( dataStatus_ );
     }
 }
 
@@ -1482,8 +1681,10 @@ void CrawlerWidget::updateEncoding()
         return codec ? codec : QTextCodec::codecForLocale();
     }();
 
-    QString encodingPrefix = encodingMib_ ? "Displayed as %1" : "Detected as %1";
-    encodingText_ = tr( encodingPrefix.arg( textCodec->name().constData() ).toLatin1() );
+    QString encodingPrefix = encodingMib_ ? tr( "Displayed as %1" ) : tr( "Detected as %1" );
+    encodingText_ = encodingPrefix.arg( textCodec->name().constData() );
+
+    logData_->interruptLoading();
 
     logData_->setDisplayEncoding( textCodec->name().constData() );
     logMainView_->forceRefresh();

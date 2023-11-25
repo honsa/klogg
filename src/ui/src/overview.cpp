@@ -40,12 +40,15 @@ Overview::Overview()
 
 void Overview::setFilteredData( const LogFilteredData* logFilteredData )
 {
+    LOG_INFO << "OverviewWidget::setFilteredData " << (void*)logFilteredData;
+
     logFilteredData_ = logFilteredData;
+    dirty_ = true;
 }
 
 void Overview::updateData( LinesCount totalNbLine )
 {
-    LOG_DEBUG << "OverviewWidget::updateData " << totalNbLine;
+    LOG_INFO << "OverviewWidget::updateData " << totalNbLine;
 
     linesInFile_ = totalNbLine;
     dirty_ = true;
@@ -61,12 +64,12 @@ void Overview::updateView( unsigned height )
     }
 }
 
-const std::vector<Overview::WeightedLine>* Overview::getMatchLines() const
+const klogg::vector<Overview::WeightedLine>* Overview::getMatchLines() const
 {
     return &matchLines_;
 }
 
-const std::vector<Overview::WeightedLine>* Overview::getMarkLines() const
+const klogg::vector<Overview::WeightedLine>* Overview::getMarkLines() const
 {
     return &markLines_;
 }
@@ -89,9 +92,9 @@ std::pair<int, int> Overview::getViewLines() const
 LineNumber Overview::fileLineFromY( int position ) const
 {
     const auto line = static_cast<LineNumber::UnderlyingType>(
-        static_cast<uint32_t>( position ) * linesInFile_.get() / static_cast<uint32_t>( height_ ) );
+        static_cast<LineNumber::UnderlyingType>( position ) * linesInFile_.get() / static_cast<LineNumber::UnderlyingType>( height_ ) );
 
-    return LineNumber( line );
+    return LineNumber{ line };
 }
 
 int Overview::yFromFileLine( LineNumber fileLine ) const
@@ -107,7 +110,7 @@ int Overview::yFromFileLine( LineNumber fileLine ) const
 // Update the internal cache
 void Overview::recalculatesLines()
 {
-    LOG_DEBUG << "OverviewWidget::recalculatesLines";
+    LOG_INFO << "OverviewWidget::recalculatesLines";
 
     if ( logFilteredData_ != nullptr ) {
         matchLines_.clear();
@@ -141,7 +144,7 @@ void Overview::recalculatesLines()
         }
     }
     else
-        LOG_DEBUG << "Overview::recalculatesLines: logFilteredData_ == NULL";
+        LOG_INFO << "Overview::recalculatesLines: logFilteredData_ == NULL";
 
     dirty_ = false;
 }

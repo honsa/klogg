@@ -47,25 +47,34 @@
 // Simple wrapper in order to use a clean Template Method
 QString AbstractLogData::getLineString( LineNumber line ) const
 {
-    return doGetLineString(line);
+    return doGetLineString( line );
 }
 
 // Simple wrapper in order to use a clean Template Method
 QString AbstractLogData::getExpandedLineString( LineNumber line ) const
 {
-    return doGetExpandedLineString(line);
+    return doGetExpandedLineString( line );
 }
 
 // Simple wrapper in order to use a clean Template Method
-std::vector<QString> AbstractLogData::getLines( LineNumber first_line, LinesCount number ) const
+klogg::vector<QString> AbstractLogData::getLines( LineNumber first_line, LinesCount number ) const
 {
     return doGetLines( first_line, number );
 }
 
 // Simple wrapper in order to use a clean Template Method
-std::vector<QString> AbstractLogData::getExpandedLines( LineNumber first_line, LinesCount number ) const
+klogg::vector<QString> AbstractLogData::getExpandedLines( LineNumber first_line,
+                                                        LinesCount number ) const
 {
     return doGetExpandedLines( first_line, number );
+}
+
+LineNumber AbstractLogData::getLineNumber( LineNumber index ) const
+{
+    LineNumber ln = doGetLineNumber( index );
+    // line number in file in editor starts from 1, convert it from 0 based index
+    ++ln;
+    return ln;
 }
 
 // Simple wrapper in order to use a clean Template Method
@@ -105,5 +114,3 @@ void AbstractLogData::detachReader() const
 {
     doDetachReader();
 }
-
-

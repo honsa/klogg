@@ -37,16 +37,18 @@
  */
 
 #include <chrono>
-#include <cmath>
 #include <exception>
 #include <functional>
-#include <oneapi/tbb/flow_graph.h>
+#include <qglobal.h>
+#include <qthread.h>
 #include <string_view>
 #include <thread>
 
 #include <QFile>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QSemaphore>
+#include <tuple>
 
 #include "configuration.h"
 #include "dispatch_to.h"
@@ -55,12 +57,14 @@
 #include "linetypes.h"
 #include "log.h"
 #include "logdata.h"
+#include "memory_info.h"
 #include "progress.h"
 #include "readablesize.h"
+#include "runnable_lambda.h"
 
 #include "logdataworker.h"
 
-constexpr int IndexingBlockSize = 1 * 1024 * 1024;
+constexpr int IndexingBlockSize = 5 * 1024 * 1024;
 
 qint64 IndexingData::getIndexedSize() const
 {
@@ -82,9 +86,9 @@ LinesCount IndexingData::getNbLines() const
     return LinesCount( linePosition_.size() );
 }
 
-LineOffset IndexingData::getPosForLine( LineNumber line ) const
+OffsetInFile IndexingData::getEndOfLineOffset( LineNumber line ) const
 {
-    return linePosition_.at( line.get() );
+    return linePosition_.at( line.get(), &linePositionCache_.local() );
 }
 
 QTextCodec* IndexingData::getEncodingGuess() const
@@ -107,18 +111,18 @@ QTextCodec* IndexingData::getForcedEncoding() const
     return encodingForced_;
 }
 
-void IndexingData::addAll( const QByteArray& block, LineLength length,
+void IndexingData::addAll( const klogg::vector<char>& block, LineLength length,
                            const FastLinePositionArray& linePosition, QTextCodec* encoding )
 
 {
-    maxLength_ = qMax( maxLength_, length );
+    maxLength_ = std::max( maxLength_, length );
     linePosition_.append_list( linePosition );
 
-    if ( !block.isEmpty() ) {
-        hash_.size += block.size();
+    if ( !block.empty() ) {
+        hash_.size += klogg::ssize( block );
 
         if ( !useFastModificationDetection_ ) {
-            hashBuilder_.addData( block.data(), static_cast<size_t>( block.size() ) );
+            hashBuilder_.addData( block.data(), block.size() );
             hash_.fullDigest = hashBuilder_.digest();
         }
     }
@@ -146,6 +150,7 @@ void IndexingData::clear()
     encodingForced_ = nullptr;
 
     progress_ = {};
+    linePositionCache_.clear();
 
     const auto& config = Configuration::get();
     useFastModificationDetection_ = config.fastModificationDetection();
@@ -159,20 +164,16 @@ size_t IndexingData::allocatedSize() const
 LogDataWorker::LogDataWorker( const std::shared_ptr<IndexingData>& indexing_data )
     : indexing_data_( indexing_data )
 {
-}
-
-void LogDataWorker::waitForDone()
-{
-    operationsExecuter_.wait();
-    interruptRequest_.clear();
+    operationsPool_.setMaxThreadCount( 1 );
 }
 
 LogDataWorker::~LogDataWorker() noexcept
 {
     try {
         interruptRequest_.set();
-        ScopedLock locker( mutex_ );
-        waitForDone();
+        ScopedLock locker( operationsMutex_ );
+        operationsPool_.waitForDone();
+        LOG_INFO << "LogDataWorker shutdown";
     } catch ( const std::exception& e ) {
         LOG_ERROR << "Failed to destroy LogDataWorker: " << e.what();
     }
@@ -180,51 +181,72 @@ LogDataWorker::~LogDataWorker() noexcept
 
 void LogDataWorker::attachFile( const QString& fileName )
 {
-    ScopedLock locker( mutex_ ); // to protect fileName_
+    ScopedLock locker( operationsMutex_ );
+    interruptRequest_.clear();
     fileName_ = fileName;
 }
 
 void LogDataWorker::indexAll( QTextCodec* forcedEncoding )
 {
-    ScopedLock locker( mutex_ );
-    LOG_DEBUG << "FullIndex requested";
+    ScopedLock locker( operationsMutex_ );
+    operationsPool_.waitForDone();
+    interruptRequest_.clear();
 
-    waitForDone();
-
-    operationsExecuter_.run( [ this, forcedEncoding, fileName = fileName_ ] {
-        auto operationRequested = std::make_unique<FullIndexOperation>(
-            fileName, indexing_data_, interruptRequest_, forcedEncoding );
-        return connectSignalsAndRun( operationRequested.get() );
-    } );
+    LOG_INFO << "FullIndex requested, forced encoding: "
+             << ( forcedEncoding != nullptr ? forcedEncoding->name().toStdString()
+                                            : std::string{ "none" } );
+    QSemaphore operationStarted;
+    operationsPool_.start(
+        createRunnable( [ this, &operationStarted, forcedEncoding, fileName = fileName_ ] {
+            LOG_INFO << "FullIndex thread started";
+            operationStarted.release();
+            ScopedLock operationLock( operationsMutex_ );
+            auto operationRequested = std::make_unique<FullIndexOperation>(
+                fileName, indexing_data_, interruptRequest_, forcedEncoding );
+            return connectSignalsAndRun( operationRequested.get() );
+        } ) );
+    operationStarted.acquire();
 }
 
 void LogDataWorker::indexAdditionalLines()
 {
-    ScopedLock locker( mutex_ );
-    LOG_DEBUG << "AddLines requested";
+    ScopedLock locker( operationsMutex_ );
+    operationsPool_.waitForDone();
+    interruptRequest_.clear();
 
-    waitForDone();
+    LOG_INFO << "PartialIndex requested";
 
-    operationsExecuter_.run( [ this, fileName = fileName_ ] {
+    QSemaphore operationStarted;
+    operationsPool_.start( createRunnable( [ this, &operationStarted, fileName = fileName_ ] {
+        QThread::currentThread()->setObjectName( "PartialIndex" );
+        LOG_INFO << "PartialIndex thread started";
+        operationStarted.release();
+        ScopedLock operationLock( operationsMutex_ );
         auto operationRequested = std::make_unique<PartialIndexOperation>( fileName, indexing_data_,
                                                                            interruptRequest_ );
         return connectSignalsAndRun( operationRequested.get() );
-    } );
+    } ) );
+    operationStarted.acquire();
 }
 
 void LogDataWorker::checkFileChanges()
 {
-    ScopedLock locker( mutex_ );
-    LOG_DEBUG << "Check file changes requested";
+    ScopedLock locker( operationsMutex_ );
+    operationsPool_.waitForDone();
+    interruptRequest_.clear();
 
-    waitForDone();
+    LOG_INFO << "Check file changes requested";
 
-    operationsExecuter_.run( [ this, fileName = fileName_ ] {
+    QSemaphore operationStarted;
+    operationsPool_.start( createRunnable( [ this, &operationStarted, fileName = fileName_ ] {
+        operationStarted.release();
+        ScopedLock operationLock( operationsMutex_ );
         auto operationRequested = std::make_unique<CheckFileChangesOperation>(
             fileName, indexing_data_, interruptRequest_ );
 
         return connectSignalsAndRun( operationRequested.get() );
-    } );
+    } ) );
+    operationStarted.acquire();
 }
 
 OperationResult LogDataWorker::connectSignalsAndRun( IndexOperation* operationRequested )
@@ -255,18 +277,18 @@ void LogDataWorker::onIndexingFinished( bool result )
 {
     if ( result ) {
         LOG_INFO << "finished indexing in worker thread";
-        emit indexingFinished( LoadingStatus::Successful );
+        Q_EMIT indexingFinished( LoadingStatus::Successful );
     }
     else {
         LOG_INFO << "indexing interrupted in worker thread";
-        emit indexingFinished( LoadingStatus::Interrupted );
+        Q_EMIT indexingFinished( LoadingStatus::Interrupted );
     }
 }
 
 void LogDataWorker::onCheckFileFinished( const MonitoredFileStatus result )
 {
     LOG_INFO << "checking file finished in worker thread";
-    emit checkFileChangesFinished( result );
+    Q_EMIT checkFileChangesFinished( result );
 }
 
 //
@@ -322,7 +344,7 @@ std::string_view::size_type findNextSingleByteDelimeter( EncodingParameters, std
 int charOffsetWithinBlock( const char* blockStart, const char* pointer,
                            const EncodingParameters& encodingParams )
 {
-    return static_cast<int>( std::distance( blockStart, pointer ) )
+    return type_safe::narrow_cast<int>( std::distance( blockStart, pointer ) )
            - encodingParams.getBeforeCrOffset();
 }
 
@@ -330,8 +352,9 @@ using FindDelimeter = std::string_view::size_type ( * )( EncodingParameters enco
                                                          std::string_view, char );
 
 LineLength::UnderlyingType
-expandTabsInLine( const QByteArray& block, std::string_view blockToExpand, int posWithinBlock,
-                  EncodingParameters encodingParams, FindDelimeter findNextDelimeter,
+expandTabsInLine( const klogg::vector<char>& block, std::string_view blockToExpand,
+                  int posWithinBlock, EncodingParameters encodingParams,
+                  FindDelimeter findNextDelimeter,
                   LineLength::UnderlyingType initialAdditionalSpaces = 0 )
 {
     auto additionalSpaces = initialAdditionalSpaces;
@@ -360,31 +383,31 @@ expandTabsInLine( const QByteArray& block, std::string_view blockToExpand, int p
 }
 
 std::tuple<bool, int, LineLength::UnderlyingType>
-findNextLineFeed( const QByteArray& block, int posWithinBlock, const IndexingState& state,
+findNextLineFeed( const klogg::vector<char>& block, int posWithinBlock, const IndexingState& state,
                   FindDelimeter findNextDelimeter )
 {
     const auto searchStart = block.data() + posWithinBlock;
-    const auto searchLineSize = static_cast<size_t>( block.size() - posWithinBlock );
+    const auto searchLineSize = static_cast<size_t>( klogg::ssize( block ) - posWithinBlock );
 
     const auto blockView = std::string_view( searchStart, searchLineSize );
     const auto nextLineFeed = findNextDelimeter( state.encodingParams, blockView, '\n' );
 
     const auto isEndOfBlock = nextLineFeed == std::string_view::npos;
-
     const auto nextLineSize = !isEndOfBlock ? nextLineFeed : searchLineSize;
-    const auto additionalSpaces
-        = expandTabsInLine( block, blockView.substr( 0, nextLineSize ), posWithinBlock,
-                            state.encodingParams, findNextDelimeter, state.additional_spaces );
 
     posWithinBlock
         = charOffsetWithinBlock( block.data(), searchStart + nextLineSize, state.encodingParams );
+
+    const auto additionalSpaces
+        = expandTabsInLine( block, blockView.substr( 0, nextLineSize ), posWithinBlock,
+                            state.encodingParams, findNextDelimeter, state.additional_spaces );
 
     return std::make_tuple( isEndOfBlock, posWithinBlock, additionalSpaces );
 }
 } // namespace parse_data_block
 
-FastLinePositionArray IndexOperation::parseDataBlock( LineOffset::UnderlyingType blockBeginning,
-                                                      const QByteArray& block,
+FastLinePositionArray IndexOperation::parseDataBlock( OffsetInFile::UnderlyingType blockBeginning,
+                                                      const klogg::vector<char>& block,
                                                       IndexingState& state ) const
 {
     using namespace parse_data_block;
@@ -401,16 +424,16 @@ FastLinePositionArray IndexOperation::parseDataBlock( LineOffset::UnderlyingType
     FastLinePositionArray linePositions;
 
     while ( !isEndOfBlock ) {
-        if ( state.pos > blockBeginning + block.size() ) {
+        if ( state.pos > blockBeginning + klogg::ssize( block ) ) {
             LOG_ERROR << "Trying to parse out of block: " << state.pos << " " << blockBeginning
                       << " " << block.size();
             break;
         }
 
-        auto posWithinBlock
-            = static_cast<int>( state.pos >= blockBeginning ? ( state.pos - blockBeginning ) : 0u );
+        auto posWithinBlock = type_safe::narrow_cast<int>(
+            state.pos >= blockBeginning ? ( state.pos - blockBeginning ) : 0 );
 
-        isEndOfBlock = posWithinBlock == block.size();
+        isEndOfBlock = posWithinBlock == klogg::ssize( block );
 
         if ( !isEndOfBlock ) {
             std::tie( isEndOfBlock, posWithinBlock, state.additional_spaces )
@@ -419,8 +442,10 @@ FastLinePositionArray IndexOperation::parseDataBlock( LineOffset::UnderlyingType
 
         const auto currentDataEnd = posWithinBlock + blockBeginning;
 
-        const auto length = ( currentDataEnd - state.pos ) / state.encodingParams.lineFeedWidth
-                            + state.additional_spaces;
+        const auto length
+            = type_safe::narrow_cast<LineLength::UnderlyingType>( currentDataEnd - state.pos )
+                  / state.encodingParams.lineFeedWidth
+              + state.additional_spaces;
 
         state.max_length = std::max( state.max_length, length );
 
@@ -428,14 +453,14 @@ FastLinePositionArray IndexOperation::parseDataBlock( LineOffset::UnderlyingType
             state.end = currentDataEnd;
             state.pos = state.end + state.encodingParams.lineFeedWidth;
             state.additional_spaces = 0;
-            linePositions.append( LineOffset( state.pos ) );
+            linePositions.append( OffsetInFile( state.pos ) );
         }
     }
 
     return linePositions;
 }
 
-void IndexOperation::guessEncoding( const QByteArray& block,
+void IndexOperation::guessEncoding( const klogg::vector<char>& block,
                                     IndexingData::MutateAccessor& scopedAccessor,
                                     IndexingState& state ) const
 {
@@ -463,12 +488,14 @@ void IndexOperation::guessEncoding( const QByteArray& block,
 }
 
 std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
-                                                            BlockReader::gateway_type& gw )
+                                                            BlockPrefetcher& blockPrefetcher )
 {
     using namespace std::chrono;
     using clock = high_resolution_clock;
 
     LOG_INFO << "Starting IO thread";
+
+    int sentBlocksCount = 0;
 
     microseconds ioDuration{};
     while ( !file.atEnd() ) {
@@ -477,34 +504,37 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
             break;
         }
 
-        BlockData blockData{ file.pos(), QByteArray{ IndexingBlockSize, Qt::Uninitialized } };
+        BlockData blockData{ file.pos(), new klogg::vector<char>( IndexingBlockSize ) };
 
         clock::time_point ioT1 = clock::now();
         const auto readBytes
-            = static_cast<int>( file.read( blockData.second.data(), blockData.second.size() ) );
+            = file.read( blockData.second->data(), klogg::ssize( *blockData.second ) );
 
         if ( readBytes < 0 ) {
             LOG_ERROR << "Reading past the end of file";
             break;
         }
 
-        if ( readBytes < blockData.second.size() ) {
-            blockData.second.resize( readBytes );
+        if ( readBytes < klogg::ssize( *blockData.second ) ) {
+            blockData.second->resize( static_cast<size_t>( readBytes ) );
         }
 
         clock::time_point ioT2 = clock::now();
 
         ioDuration += duration_cast<microseconds>( ioT2 - ioT1 );
 
-        LOG_DEBUG << "Sending block " << blockData.first << " size " << blockData.second.size();
+        if ( sentBlocksCount % 10 == 0 ) {
+            LOG_INFO << "Sending block " << blockData.first << " size " << blockData.second->size();
+        }
 
-        while ( !gw.try_put( blockData ) ) {
+        while ( !blockPrefetcher.try_put( std::move( blockData ) ) && !interruptRequest_ ) {
             std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
         }
+        sentBlocksCount++;
     }
 
-    auto lastBlock = std::make_pair( -1, QByteArray{} );
-    while ( !gw.try_put( lastBlock ) ) {
+    auto lastBlock = std::make_pair( -1, new klogg::vector<char>{} );
+    while ( !blockPrefetcher.try_put( lastBlock ) && !interruptRequest_ ) {
         std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
     }
 
@@ -515,7 +545,7 @@ std::chrono::microseconds IndexOperation::readFileInBlocks( QFile& file,
 void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& blockData )
 {
     const auto& blockBeginning = blockData.first;
-    const auto& block = blockData.second;
+    const auto& block = *blockData.second;
 
     LOG_DEBUG << "Indexing block " << blockBeginning << " start";
 
@@ -527,7 +557,7 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
 
     guessEncoding( block, scopedAccessor, state );
 
-    if ( !block.isEmpty() ) {
+    if ( !block.empty() ) {
         const auto linePositions = parseDataBlock( blockBeginning, block, state );
         auto maxLength = state.max_length;
         if ( maxLength > std::numeric_limits<LineLength::UnderlyingType>::max() ) {
@@ -535,9 +565,9 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
             maxLength = std::numeric_limits<LineLength::UnderlyingType>::max();
         }
 
-        scopedAccessor.addAll( block,
-                               LineLength( static_cast<LineLength::UnderlyingType>( maxLength ) ),
-                               linePositions, state.encodingGuess );
+        scopedAccessor.addAll(
+            block, LineLength( type_safe::narrow_cast<LineLength::UnderlyingType>( maxLength ) ),
+            linePositions, state.encodingGuess );
 
         // Update the caller for progress indication
         const auto progress
@@ -545,8 +575,8 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
 
         if ( progress != scopedAccessor.getProgress() ) {
             scopedAccessor.setProgress( progress );
-            LOG_INFO << "Indexing progress " << progress << ", indexed size " << state.pos;
-            emit indexingProgressed( progress );
+            LOG_DEBUG << "Indexing progress " << progress << ", indexed size " << state.pos;
+            Q_EMIT indexingProgressed( progress );
         }
     }
     else {
@@ -556,8 +586,9 @@ void IndexOperation::indexNextBlock( IndexingState& state, const BlockData& bloc
     LOG_DEBUG << "Indexing block " << blockBeginning << " done";
 }
 
-void IndexOperation::doIndex( LineOffset initialPosition )
+void IndexOperation::doIndex( OffsetInFile initialPosition )
 {
+    LOG_INFO << "Indexing file " << fileName_;
     QFile file( fileName_ );
 
     if ( !( file.isOpen() || file.open( QIODevice::ReadOnly ) ) ) {
@@ -571,9 +602,11 @@ void IndexOperation::doIndex( LineOffset initialPosition )
         scopedAccessor.setEncodingGuess( QTextCodec::codecForLocale() );
 
         scopedAccessor.setProgress( 100 );
-        emit indexingProgressed( 100 );
+        Q_EMIT indexingProgressed( 100 );
         return;
     }
+
+    LOG_INFO << "File size " << file.size();
 
     IndexingState state;
     state.pos = initialPosition.get();
@@ -588,6 +621,9 @@ void IndexOperation::doIndex( LineOffset initialPosition )
         }
 
         state.encodingGuess = scopedAccessor.getEncodingGuess();
+        LOG_INFO << "Initial encoding "
+                 << ( state.fileTextCodec != nullptr ? state.fileTextCodec->name().toStdString()
+                                                     : std::string{ "auto" } );
     }
 
     const auto& config = Configuration::get();
@@ -602,36 +638,23 @@ void IndexOperation::doIndex( LineOffset initialPosition )
     const auto indexingStartTime = clock::now();
 
     tbb::flow::graph indexingGraph;
-
-    std::thread ioThread;
-    auto blockReaderAsync = BlockReader(
-        indexingGraph, tbb::flow::serial,
-        [ this, &ioThread, &file, &ioDuration ]( const auto&, auto& gateway ) {
-            gateway.reserve_wait();
-            ioThread = std::thread( [ this, &file, &ioDuration, gw = std::ref( gateway ) ] {
-                ioDuration = readFileInBlocks( file, gw.get() );
-                gw.get().release_wait();
-            } );
-        } );
-
     auto blockPrefetcher = tbb::flow::limiter_node<BlockData>( indexingGraph, prefetchBufferSize );
     auto blockQueue = tbb::flow::queue_node<BlockData>( indexingGraph );
 
     auto blockParser = tbb::flow::function_node<BlockData, tbb::flow::continue_msg>(
         indexingGraph, tbb::flow::serial, [ this, &state ]( const BlockData& blockData ) {
             indexNextBlock( state, blockData );
+            delete blockData.second;
             return tbb::flow::continue_msg{};
         } );
 
-    tbb::flow::make_edge( blockReaderAsync, blockPrefetcher );
     tbb::flow::make_edge( blockPrefetcher, blockQueue );
     tbb::flow::make_edge( blockQueue, blockParser );
     tbb::flow::make_edge( blockParser, blockPrefetcher.decrementer() );
 
     file.seek( state.pos );
-    blockReaderAsync.try_put( tbb::flow::continue_msg{} );
+    ioDuration = readFileInBlocks( file, blockPrefetcher );
     indexingGraph.wait_for_all();
-    ioThread.join();
 
     IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
 
@@ -642,7 +665,7 @@ void IndexOperation::doIndex( LineOffset initialPosition )
         LOG_WARNING << "Non LF terminated file, adding a fake end of line";
 
         FastLinePositionArray line_position;
-        line_position.append( LineOffset( state.file_size + 1 ) );
+        line_position.append( OffsetInFile( state.file_size + 1 ) );
         line_position.setFakeFinalLF();
 
         scopedAccessor.addAll( {}, 0_length, line_position, state.encodingGuess );
@@ -682,6 +705,7 @@ void IndexOperation::doIndex( LineOffset initialPosition )
                   / static_cast<float>( duration.count() ) )
                     / ( 1024 * 1024 )
              << " MiB/s";
+    LOG_INFO << "Memory usage " << readableSize( usedMemory() );
 
     if ( interruptRequest_ ) {
         scopedAccessor.clear();
@@ -689,9 +713,10 @@ void IndexOperation::doIndex( LineOffset initialPosition )
 
     if ( scopedAccessor.getMaxLength().get()
          == std::numeric_limits<LineLength::UnderlyingType>::max() ) {
-
-        QMessageBox::critical( nullptr, "Klogg", "Can't index file: some lines are too long",
-                               QMessageBox::Abort );
+        dispatchToMainThread( [] {
+            QMessageBox::critical( nullptr, "Klogg", "Can't index file: some lines are too long",
+                                   QMessageBox::Close );
+        } );
 
         scopedAccessor.clear();
     }
@@ -707,7 +732,7 @@ OperationResult FullIndexOperation::run()
     try {
         LOG_INFO << "FullIndexOperation::run(), file " << fileName_.toStdString();
 
-        emit indexingProgressed( 0 );
+        Q_EMIT indexingProgressed( 0 );
 
         {
             IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
@@ -721,7 +746,7 @@ OperationResult FullIndexOperation::run()
                  << static_cast<bool>( interruptRequest_ );
 
         const auto result = interruptRequest_ ? false : true;
-        emit indexingFinished( result );
+        Q_EMIT indexingFinished( result );
         return result;
     } catch ( const std::exception& err ) {
         const auto errorString = QString( "FullIndexOperation failed: %1" ).arg( err.what() );
@@ -730,8 +755,12 @@ OperationResult FullIndexOperation::run()
             IssueReporter::askUserAndReportIssue( IssueTemplate::Exception, errorString );
         } );
 
-        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-        scopedAccessor.clear();
+        {
+            IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+            scopedAccessor.clear();
+        }
+
+        Q_EMIT indexingFinished( false );
         return false;
     }
 }
@@ -742,18 +771,18 @@ OperationResult PartialIndexOperation::run()
         LOG_INFO << "PartialIndexOperation::run(), file " << fileName_.toStdString();
 
         const auto initialPosition
-            = LineOffset( IndexingData::ConstAccessor{ indexing_data_.get() }.getIndexedSize() );
+            = OffsetInFile( IndexingData::ConstAccessor{ indexing_data_.get() }.getIndexedSize() );
 
         LOG_INFO << "PartialIndexOperation: Starting the count at " << initialPosition << " ...";
 
-        emit indexingProgressed( 0 );
+        Q_EMIT indexingProgressed( 0 );
 
         doIndex( initialPosition );
 
         LOG_INFO << "PartialIndexOperation: ... finished counting.";
 
         const auto result = interruptRequest_ ? false : true;
-        emit indexingFinished( result );
+        Q_EMIT indexingFinished( result );
         return result;
     } catch ( const std::exception& err ) {
         const auto errorString = QString( "PartialIndexOperation failed: %1" ).arg( err.what() );
@@ -762,9 +791,12 @@ OperationResult PartialIndexOperation::run()
             IssueReporter::askUserAndReportIssue( IssueTemplate::Exception, errorString );
         } );
 
-        IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
-        scopedAccessor.clear();
+        {
+            IndexingData::MutateAccessor scopedAccessor{ indexing_data_.get() };
+            scopedAccessor.clear();
+        }
 
+        Q_EMIT indexingFinished( false );
         return false;
     }
 }
@@ -774,7 +806,7 @@ OperationResult CheckFileChangesOperation::run()
     try {
         LOG_INFO << "CheckFileChangesOperation::run(), file " << fileName_.toStdString();
         const auto result = doCheckFileChanges();
-        emit fileCheckFinished( result );
+        Q_EMIT fileCheckFinished( result );
         return result;
     } catch ( const std::exception& err ) {
         const auto errorString
@@ -783,6 +815,7 @@ OperationResult CheckFileChangesOperation::run()
         dispatchToMainThread( [ errorString ]() {
             IssueReporter::askUserAndReportIssue( IssueTemplate::Exception, errorString );
         } );
+        Q_EMIT fileCheckFinished( MonitoredFileStatus::Truncated );
         return MonitoredFileStatus::Truncated;
     }
 }

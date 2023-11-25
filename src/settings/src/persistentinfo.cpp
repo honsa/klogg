@@ -42,9 +42,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
-#include <QStringList>
 
-#include <whereami/whereami.h>
+#include <whereami.h>
 
 #include "log.h"
 #include "uuid.h"

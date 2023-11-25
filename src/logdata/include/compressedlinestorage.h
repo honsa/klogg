@@ -42,8 +42,8 @@
 
 #include "blockpool.h"
 #include "linetypes.h"
+#include <type_safe/strong_typedef.hpp>
 
-#include "tbb/enumerable_thread_specific.h"
 
 // This class is a compressed storage backend for LinePositionArray
 // It emulates the interface of a vector, but take advantage of the nature
@@ -120,8 +120,8 @@ class CompressedLinePositionStorage {
     CompressedLinePositionStorage& operator=( CompressedLinePositionStorage&& orig ) noexcept;
 
     // Append the passed end-of-line to the storage
-    void append( LineOffset pos );
-    void push_back( LineOffset pos )
+    void append( OffsetInFile pos );
+    void push_back( OffsetInFile pos )
     {
         append( pos );
     }
@@ -134,21 +134,37 @@ class CompressedLinePositionStorage {
 
     size_t allocatedSize() const;
 
-    // Element at index
-    LineOffset at( size_t i ) const
+    struct BlockOffset 
+        : type_safe::strong_typedef<BlockOffset, size_t>
+        , type_safe::strong_typedef_op::increment<BlockOffset>
+        , type_safe::strong_typedef_op::addition<BlockOffset>
+        , type_safe::strong_typedef_op::relational_comparison<BlockOffset>
+        , type_safe::strong_typedef_op::equality_comparison<BlockOffset>
+        , type_safe::strong_typedef_op::explicit_bool<BlockOffset>
     {
-        return at( LineNumber( i ) );
+        using strong_typedef::strong_typedef;
+    };
+
+    // Cache the last position read
+    // This is to speed up consecutive reads (whole page)
+    struct Cache {
+        LineNumber index {std::numeric_limits<LineNumber::UnderlyingType>::max() - 1U};
+        OffsetInFile position {0};
+        BlockOffset offset {0};
+    };
+
+    // Element at index
+    OffsetInFile at( size_t i, Cache* lastPosition = nullptr ) const
+    {
+        return at( LineNumber( i ), lastPosition );
     }
-    LineOffset at( LineNumber i ) const;
+    OffsetInFile at( LineNumber i, Cache* lastPosition = nullptr ) const;
 
     // Add one list to the other
-    void append_list( const std::vector<LineOffset>& positions );
+    void append_list( const klogg::vector<OffsetInFile>& positions );
 
     // Pop the last element of the storage
     void pop_back();
-
-    using BlockOffset = fluent::NamedType<size_t, struct block_offset, fluent::Incrementable,
-                                          fluent::Addable, fluent::Comparable>;
 
   private:
     // Utility for move ctor/assign
@@ -156,13 +172,13 @@ class CompressedLinePositionStorage {
 
     // The two indexes
     BlockPool<uint32_t> pool32_;
-    BlockPool<uint64_t> pool64_;
+    BlockPool<OffsetInFile::UnderlyingType> pool64_;
 
     // Total number of lines in storage
     LinesCount nb_lines_;
 
     // Current position (position of the end of the last line added)
-    LineOffset current_pos_;
+    OffsetInFile current_pos_;
 
     uint32_t block_index_;
     uint32_t long_block_index_;
@@ -183,23 +199,6 @@ class CompressedLinePositionStorage {
     // A null here means pop_back need to free the block
     // that has just been created.
     BlockOffset previous_block_offset_;
-
-    // Cache the last position read
-    // This is to speed up consecutive reads (whole page)
-    struct Cache {
-        Cache()
-            : index{ std::numeric_limits<uint32_t>::max() - 1U }
-            , position{ 0 }
-            , offset{ 0 }
-        {
-        }
-
-        LineNumber index;
-        LineOffset position;
-        BlockOffset offset;
-    };
-
-    mutable tbb::enumerable_thread_specific<Cache> cache_;
 };
 
 #endif

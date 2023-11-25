@@ -42,11 +42,11 @@
 // Search is started just after the selection and the selection is updated
 // if a match is found.
 
-#include <QApplication>
 #include <QtConcurrent>
 
 #include "abstractlogdata.h"
 #include "dispatch_to.h"
+#include "linetypes.h"
 #include "log.h"
 #include "quickfindpattern.h"
 #include "selection.h"
@@ -67,11 +67,11 @@ void SearchingNotifier::sendNotification( LineNumber current_line, LinesCount nb
         backward ? ( ( nb_lines.get() - current_line.get() ) / nb_lines.get() * 100 )
                  : ( current_line.get() / nb_lines.get() ) * 100 );
 
-    emit notify( QFNotificationProgress( progress ) );
+    Q_EMIT notify( QFNotificationProgress( progress ) );
     startTime_ = QTime::currentTime().addMSecs( -800 );
 }
 
-void QuickFind::LastMatchPosition::set( LineNumber line, int column )
+void QuickFind::LastMatchPosition::set( LineNumber line, LineColumn column )
 {
     if ( ( !line_.has_value() ) || ( ( line <= *line_ ) && ( column < column_ ) ) ) {
         line_ = line;
@@ -84,7 +84,7 @@ void QuickFind::LastMatchPosition::set( const FilePosition& position )
     set( position.line(), position.column() );
 }
 
-bool QuickFind::LastMatchPosition::isLater( OptionalLineNumber line, int column ) const
+bool QuickFind::LastMatchPosition::isLater( OptionalLineNumber line, LineColumn column ) const
 {
     if ( !line_.has_value() || !line.has_value() )
         return false;
@@ -101,7 +101,7 @@ bool QuickFind::LastMatchPosition::isLater( const FilePosition& position ) const
     return isLater( position.line(), position.column() );
 }
 
-bool QuickFind::LastMatchPosition::isSooner( OptionalLineNumber line, int column ) const
+bool QuickFind::LastMatchPosition::isSooner( OptionalLineNumber line, LineColumn column ) const
 {
     if ( !line_.has_value() || !line.has_value() )
         return false;
@@ -169,13 +169,13 @@ void QuickFind::onSearchFutureReady()
     auto selection = operationFuture_.result();
 
     if ( selection.isValid() ) {
-        emit searchDone( true, selection );
+        Q_EMIT searchDone( true, selection );
     }
     else if ( incrementalSearchStatus_.direction() != None ) {
-        emit searchDone( false, Portion{ incrementalSearchStatus_.position().line(), 0, 0 } );
+        Q_EMIT searchDone( false, Portion{ incrementalSearchStatus_.position().line(), 0_lcol, 0_lcol } );
     }
     else {
-        emit searchDone( false, selection );
+        Q_EMIT searchDone( false, selection );
     }
 }
 
@@ -200,8 +200,16 @@ void QuickFind::incrementallySearchForward( Selection selection, QuickFindMatche
         incrementalSearchStatus_ = IncrementalSearchStatus( Forward, start_position, selection );
     }
 
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchForward, start_position,
                                           selection, matcher );
+#else
+    operationFuture_ = QtConcurrent::run(
+        qOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>(
+            &QuickFind::doSearchForward ),
+        this, start_position, selection, matcher );
+#endif
+
     operationWatcher_.setFuture( operationFuture_ );
 }
 
@@ -226,8 +234,15 @@ void QuickFind::incrementallySearchBackward( Selection selection, QuickFindMatch
         incrementalSearchStatus_ = IncrementalSearchStatus( Backward, start_position, selection );
     }
 
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchBackward, start_position,
                                           selection, matcher );
+#else
+    operationFuture_ = QtConcurrent::run(
+        qOverload<const FilePosition&, const Selection&, const QuickFindMatcher&>(
+            &QuickFind::doSearchBackward ),
+        this, start_position, selection, matcher );
+#endif
     operationWatcher_.setFuture( operationFuture_ );
 }
 
@@ -237,7 +252,13 @@ void QuickFind::searchForward( Selection selection, QuickFindMatcher matcher )
     interruptRequested_.set();
     operationWatcher_.waitForFinished();
 
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchForward, selection, matcher );
+#else
+    operationFuture_ = QtConcurrent::run(
+        qOverload<const Selection&, const QuickFindMatcher&>( &QuickFind::doSearchForward ), this,
+        selection, matcher );
+#endif
     operationWatcher_.setFuture( operationFuture_ );
 }
 
@@ -247,7 +268,13 @@ void QuickFind::searchBackward( Selection selection, QuickFindMatcher matcher )
     interruptRequested_.set();
     operationWatcher_.waitForFinished();
 
+#if QT_VERSION < QT_VERSION_CHECK( 6, 0, 0 )
     operationFuture_ = QtConcurrent::run( this, &QuickFind::doSearchBackward, selection, matcher );
+#else
+    operationFuture_ = QtConcurrent::run(
+        qOverload<const Selection&, const QuickFindMatcher&>( &QuickFind::doSearchBackward ), this,
+        selection, matcher );
+#endif
     operationWatcher_.setFuture( operationFuture_ );
 }
 
@@ -265,8 +292,8 @@ Portion QuickFind::doSearchForward( const FilePosition& start_position, const Se
     interruptRequested_.clear();
 
     bool found = false;
-    int found_start_col{};
-    int found_end_col{};
+    LineColumn found_start_col{};
+    LineColumn found_end_col{};
 
     if ( !matcher.isActive() )
         return {};
@@ -285,7 +312,7 @@ Portion QuickFind::doSearchForward( const FilePosition& start_position, const Se
     // We look at the rest of the first line
     if ( matcher.isLineMatching( logData_.getExpandedLineString( line ),
                                  start_position.column() ) ) {
-        matcher.getLastMatch( &found_start_col, &found_end_col );
+        std::tie( found_start_col, found_end_col ) = matcher.getLastMatch();
         found = true;
     }
     else {
@@ -295,7 +322,7 @@ Portion QuickFind::doSearchForward( const FilePosition& start_position, const Se
         ++line;
         while ( line < nb_lines ) {
             if ( matcher.isLineMatching( logData_.getExpandedLineString( line ) ) ) {
-                matcher.getLastMatch( &found_start_col, &found_end_col );
+                std::tie( found_start_col, found_end_col ) = matcher.getLastMatch();
                 found = true;
                 break;
             }
@@ -312,7 +339,7 @@ Portion QuickFind::doSearchForward( const FilePosition& start_position, const Se
 
     if ( found ) {
         // Clear any notification
-        emit clearNotification();
+        Q_EMIT clearNotification();
 
         return Portion{ line, found_start_col, found_end_col };
     }
@@ -348,8 +375,8 @@ Portion QuickFind::doSearchBackward( const FilePosition& start_position, const S
     interruptRequested_.clear();
 
     bool found = false;
-    int start_col{};
-    int end_col{};
+    LineColumn start_col{};
+    LineColumn end_col{};
 
     if ( !matcher.isActive() )
         return {};
@@ -366,25 +393,25 @@ Portion QuickFind::doSearchBackward( const FilePosition& start_position, const S
     auto line = start_position.line();
     LOG_DEBUG << "Start searching at line " << line;
     // We look at the beginning of the first line
-    if ( ( start_position.column() > 0 )
+    if ( ( start_position.column() > 0_lcol )
          && ( matcher.isLineMatchingBackward( logData_.getExpandedLineString( line ),
                                               start_position.column() ) ) ) {
-        matcher.getLastMatch( &start_col, &end_col );
+        std::tie( start_col, end_col ) = matcher.getLastMatch();
         found = true;
     }
     else {
         searchingNotifier_.reset();
         // And then the rest of the file
         const auto nb_lines = logData_.getNbLine();
-        if ( line.get() > 0 ) {
+        if ( line > 0_lnum ) {
             --line;
             while ( true ) {
                 if ( matcher.isLineMatchingBackward( logData_.getExpandedLineString( line ) ) ) {
-                    matcher.getLastMatch( &start_col, &end_col );
+                    std::tie( start_col, end_col ) = matcher.getLastMatch();
                     found = true;
                     break;
                 }
-                if ( line.get() == 0 ) {
+                if ( line == 0_lnum ) {
                     break;
                 }
 
@@ -402,7 +429,7 @@ Portion QuickFind::doSearchBackward( const FilePosition& start_position, const S
 
     if ( found ) {
         // Clear any notification
-        emit clearNotification();
+        Q_EMIT clearNotification();
 
         return Portion{ line, start_col, end_col };
     }

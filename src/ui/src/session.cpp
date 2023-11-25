@@ -21,10 +21,8 @@
 
 #include "log.h"
 
-#include <QFileInfo>
 #include <algorithm>
 #include <cassert>
-#include <cstdint>
 
 #include "logdata.h"
 #include "logfiltereddata.h"
@@ -50,7 +48,7 @@ Session::~Session()
 ViewInterface* Session::getViewIfOpen( const QString& file_name ) const
 {
     auto result = std::find_if( openFiles_.begin(), openFiles_.end(),
-                                [&]( const std::pair<const ViewInterface*, OpenFile>& o ) {
+                                [ & ]( const std::pair<const ViewInterface*, OpenFile>& o ) {
                                     return ( o.second.fileName == file_name );
                                 } );
 
@@ -192,7 +190,7 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
     LOG_DEBUG << "Session returned " << session_files.size();
     std::vector<std::pair<QString, ViewInterface*>> result;
 
-    for ( auto file : session_files ) {
+    for ( const auto& file : session_files ) {
         LOG_DEBUG << "Create view for " << file.fileName;
         ViewInterface* view
             = appSession_->openAlways( file.fileName, view_factory, file.viewContext );
@@ -200,7 +198,7 @@ WindowSession::restore( const std::function<ViewInterface*()>& view_factory,
         openedFiles_.emplace_back( file.fileName );
     }
 
-    *current_file_index = static_cast<int>( result.size() - 1 );
+    *current_file_index = klogg::isize( result ) - 1;
 
     return result;
 }

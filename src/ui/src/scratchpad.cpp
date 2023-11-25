@@ -20,33 +20,57 @@
 #include "scratchpad.h"
 
 #include <memory>
+#include <optional>
 
 #include <QAction>
 #include <QApplication>
 #include <QByteArray>
 #include <QClipboard>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDomDocument>
 #include <QFormLayout>
-#include <QHBoxLayout>
 #include <QJsonDocument>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QStatusBar>
+#include <QTimeZone>
 #include <QToolBar>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include "crc32.h"
+#include "clipboard.h"
+
+namespace klogg {
+
+class DateTimeBox : public QFormLayout {
+  public:
+    DateTimeBox();
+    ~DateTimeBox() = default;
+
+    QString displayTime( const QString& text );
+
+  private:
+    QString displayTime();
+
+  private:
+    std::optional<qint64> timestamp_;
+    QLineEdit* timeLine_;
+    QComboBox* tzComboBox_;
+};
+} // namespace klogg
 
 namespace {
 
-template <typename T> QString formatHex( T value )
+template <typename T>
+QString formatHex( T value )
 {
     return QString::fromLatin1( QByteArray::number( value, 16 ).rightJustified( 8, '0', false ) );
 }
 
-template <typename T> QString formatDec( T value )
+template <typename T>
+QString formatDec( T value )
 {
     return QString::fromLatin1( QByteArray::number( value, 10 ) );
 }
@@ -75,33 +99,33 @@ ScratchPad::ScratchPad( QWidget* parent )
     auto toolBar = std::make_unique<QToolBar>();
 
     auto decodeBase64Action = std::make_unique<QAction>( "From base64" );
-    connect( decodeBase64Action.get(), &QAction::triggered, [this]( auto ) { decodeBase64(); } );
+    connect( decodeBase64Action.get(), &QAction::triggered, [ this ]( auto ) { decodeBase64(); } );
     toolBar->addAction( decodeBase64Action.release() );
 
     auto encodeBase64Action = std::make_unique<QAction>( "To base64" );
-    connect( encodeBase64Action.get(), &QAction::triggered, [this]( auto ) { encodeBase64(); } );
+    connect( encodeBase64Action.get(), &QAction::triggered, [ this ]( auto ) { encodeBase64(); } );
     toolBar->addAction( encodeBase64Action.release() );
 
     auto decodeHexAction = std::make_unique<QAction>( "From hex" );
-    connect( decodeHexAction.get(), &QAction::triggered, [this]( auto ) { decodeHex(); } );
+    connect( decodeHexAction.get(), &QAction::triggered, [ this ]( auto ) { decodeHex(); } );
     toolBar->addAction( decodeHexAction.release() );
 
     auto encodeHexAction = std::make_unique<QAction>( "To hex" );
-    connect( encodeHexAction.get(), &QAction::triggered, [this]( auto ) { encodeHex(); } );
+    connect( encodeHexAction.get(), &QAction::triggered, [ this ]( auto ) { encodeHex(); } );
     toolBar->addAction( encodeHexAction.release() );
 
     auto decodeUrlAction = std::make_unique<QAction>( "Decode url" );
-    connect( decodeUrlAction.get(), &QAction::triggered, [this]( auto ) { decodeUrl(); } );
+    connect( decodeUrlAction.get(), &QAction::triggered, [ this ]( auto ) { decodeUrl(); } );
     toolBar->addAction( decodeUrlAction.release() );
 
     toolBar->addSeparator();
 
     auto formatJsonAction = std::make_unique<QAction>( "Format json" );
-    connect( formatJsonAction.get(), &QAction::triggered, [this]( auto ) { formatJson(); } );
+    connect( formatJsonAction.get(), &QAction::triggered, [ this ]( auto ) { formatJson(); } );
     toolBar->addAction( formatJsonAction.release() );
 
     auto formatXmlAction = std::make_unique<QAction>( "Format xml" );
-    connect( formatXmlAction.get(), &QAction::triggered, [this]( auto ) { formatXml(); } );
+    connect( formatXmlAction.get(), &QAction::triggered, [ this ]( auto ) { formatXml(); } );
     toolBar->addAction( formatXmlAction.release() );
 
     toolBar->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Minimum );
@@ -111,7 +135,7 @@ ScratchPad::ScratchPad( QWidget* parent )
     auto transLayout = std::make_unique<QFormLayout>();
 
     auto addBoxToLayout
-        = [&transLayout, this]( const QString& label, QLineEdit** widget, auto changeFunction ) {
+        = [ &transLayout, this ]( const QString& label, QLineEdit** widget, auto changeFunction ) {
               auto box = std::make_unique<QLineEdit>();
               box->setReadOnly( true );
               *widget = box.get();
@@ -122,10 +146,14 @@ ScratchPad::ScratchPad( QWidget* parent )
 
     addBoxToLayout( "CRC32 hex", &crc32HexBox_, &ScratchPad::crc32Hex );
     addBoxToLayout( "CRC32 dec", &crc32DecBox_, &ScratchPad::crc32Dec );
-    addBoxToLayout( "Unix time", &unixTimeBox_, &ScratchPad::unixTime );
     addBoxToLayout( "File time", &fileTimeBox_, &ScratchPad::fileTime );
     addBoxToLayout( "Dec->Hex", &decToHexBox_, &ScratchPad::decToHex );
     addBoxToLayout( "Hex->Dec", &hexToDecBox_, &ScratchPad::hexToDec );
+    timeBox_ = new klogg::DateTimeBox();
+    transLayout->addRow( timeBox_ );
+    connect( this, &ScratchPad::updateTransformation, [ this ]() {
+        transformText( [ this ]( QString text ) { return timeBox_->displayTime( text ); } );
+    } );
 
     auto hLayout = std::make_unique<QHBoxLayout>();
     hLayout->addWidget( textEdit.get(), 3 );
@@ -144,6 +172,24 @@ ScratchPad::ScratchPad( QWidget* parent )
     connect( textEdit_, &QPlainTextEdit::textChanged, this, &ScratchPad::updateTransformation );
     connect( textEdit_, &QPlainTextEdit::selectionChanged, this,
              &ScratchPad::updateTransformation );
+}
+
+void ScratchPad::addData( QString newData )
+{
+    if ( newData.isEmpty() ) {
+        return;
+    }
+
+    textEdit_->appendPlainText( newData );
+}
+
+void ScratchPad::replaceData( QString newData )
+{
+    if ( newData.isEmpty() ) {
+        return;
+    }
+
+    textEdit_->setPlainText( newData );
 }
 
 QString ScratchPad::transformText( const std::function<QString( QString )>& transform )
@@ -173,7 +219,7 @@ void ScratchPad::transformTextInPlace( const std::function<QString( QString )>& 
         cursor.insertText( transformedText );
         textEdit_->setTextCursor( cursor );
 
-        QApplication::clipboard()->setText( transformedText );
+        sendTextToClipboard( transformedText );
 
         statusBar_->showMessage( "Copied to clipboard", StatusTimeout );
     }
@@ -236,23 +282,6 @@ void ScratchPad::crc32Dec()
     } ) );
 }
 
-void ScratchPad::unixTime()
-{
-    unixTimeBox_->setText( transformText( []( QString text ) {
-        bool isOk = false;
-        const auto unixTime = text.toUtf8().toLongLong( &isOk );
-        if ( isOk ) {
-            QDateTime dateTime;
-            dateTime.setTimeSpec( Qt::UTC );
-            dateTime.setSecsSinceEpoch( unixTime );
-            return dateTime.toString( Qt::ISODate );
-        }
-        else {
-            return QString{};
-        }
-    } ) );
-}
-
 void ScratchPad::fileTime()
 {
     fileTimeBox_->setText( transformText( []( QString text ) {
@@ -301,7 +330,7 @@ void ScratchPad::hexToDec()
 void ScratchPad::formatJson()
 {
     transformTextInPlace( []( QString text ) {
-        const auto start = text.indexOf( '{' );
+        const auto start = std::min( text.indexOf( '{' ), text.indexOf( '[' ) );
 
         QJsonParseError parseError;
         auto json = QJsonDocument::fromJson( text.mid( start ).toUtf8(), &parseError );
@@ -324,4 +353,51 @@ void ScratchPad::formatXml()
 
         return xml.toString( 2 );
     } );
+}
+
+klogg::DateTimeBox::DateTimeBox()
+    : QFormLayout()
+    , timestamp_()
+    , timeLine_( new QLineEdit() )
+    , tzComboBox_( new QComboBox() )
+{
+    addRow( tr( "Time" ), timeLine_ );
+    timeLine_->setReadOnly( true );
+
+    addRow( tr( "TimeZone" ), tzComboBox_ );
+    connect( tzComboBox_, &QComboBox::currentTextChanged, [ this ] { displayTime(); } );
+    auto ids = QTimeZone::availableTimeZoneIds();
+    std::for_each( ids.begin(), ids.end(), [ & ]( const auto& item ) {
+        if ( item.contains( "UTC" ) ) {
+            tzComboBox_->addItem( item );
+        }
+    } );
+}
+
+QString klogg::DateTimeBox::displayTime( const QString& text )
+{
+    bool isOk = false;
+    const auto unixTime = text.toUtf8().toLongLong( &isOk );
+    if ( !isOk ) {
+        timestamp_.reset();
+        timeLine_->setText( QString{} );
+        return QString{};
+    }
+    timestamp_ = unixTime;
+    return displayTime();
+}
+
+QString klogg::DateTimeBox::displayTime()
+{
+    if ( !timestamp_ ) {
+        return QString{};
+    }
+
+    // Convert to a date string for the selected time zone
+    auto tz = QTimeZone( tzComboBox_->currentData( Qt::DisplayRole ).toByteArray() );
+    auto dateTime = QDateTime::fromSecsSinceEpoch( timestamp_.value() ).toTimeZone( tz );
+    timeLine_->setText( dateTime.toString( Qt::ISODate ) );
+    timeLine_->setCursorPosition( 0 );
+
+    return timeLine_->text();
 }

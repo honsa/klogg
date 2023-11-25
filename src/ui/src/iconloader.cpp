@@ -14,7 +14,6 @@
 #include <QApplication>
 #include <QFile>
 #include <QPainter>
-#include <QPalette>
 #include <QPixmap>
 #include <QStyleOption>
 #include <QWidget>
@@ -58,7 +57,7 @@ bool IconLoader::shouldAutoInvert( QString /*name*/ ) const
 QPixmap IconLoader::loadPixmap( QString name, int size ) const
 {
     bool invert = shouldInvert();
-    QString scalableName, nonScalableName;
+    QString nonScalableName;
     QPixmap pmap;
     // attempt to load a pixmap with the right size and inversion
     nonScalableName = makeNonScalableFilename( name, size, invert );
